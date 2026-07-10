@@ -47,6 +47,24 @@ void SendImageToDevice(const VkContext& ctx, const vkw::ImagePackPtr& img,
     });
 }
 
+void SendGeometryToBuffer(const VkContext& ctx,
+                          const vkw::BufferPackPtr& buf,
+                          const CpuImage& cpu_img, VType vtype) {
+    DRESSI_CHECK(cpu_img.channels == NumComponents(vtype),
+                 "sendImg: channel count does not match the Variable's VType");
+    const size_t n_elems = cpu_img.data.size();
+    DRESSI_CHECK(buf->size >= n_elems * 4, "Geometry buffer size mismatch");
+    if (IsIntVType(vtype)) {
+        std::vector<uint32_t> ints(n_elems);
+        for (size_t i = 0; i < n_elems; i++) {
+            ints[i] = uint32_t(int64_t(cpu_img.data[i]));
+        }
+        vkw::SendToDevice(ctx.device, buf, ints.data(), n_elems * 4);
+    } else {
+        vkw::SendToDevice(ctx.device, buf, cpu_img.data.data(), n_elems * 4);
+    }
+}
+
 CpuImage ReceiveImageFromDevice(const VkContext& ctx,
                                 const vkw::ImagePackPtr& img, VType vtype) {
     const uint32_t n_logical = NumComponents(vtype);

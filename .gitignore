@@ -15,3 +15,10 @@ CMakeUserPresets.json
 # Misc
 *.log
 Testing/
+
+# Example outputs
+/gt_view0.png
+/recovered_texture.png
+
+# Datasets
+/data/

@@ -21,6 +21,12 @@ void SendImageToDevice(const VkContext& ctx, const vkw::ImagePackPtr& img,
 CpuImage ReceiveImageFromDevice(const VkContext& ctx,
                                 const vkw::ImagePackPtr& img, VType vtype);
 
+// Fills a host-visible vertex/index buffer from CPU data. Int VTypes
+// (face indices) are converted from the CpuImage's float storage to uint32.
+void SendGeometryToBuffer(const VkContext& ctx,
+                          const vkw::BufferPackPtr& buf,
+                          const CpuImage& cpu_img, VType vtype);
+
 }  // namespace dressi
 
 #endif  // DRESSI_VK_TRANSFER_H

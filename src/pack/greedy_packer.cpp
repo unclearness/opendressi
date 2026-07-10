@@ -45,6 +45,10 @@ bool PushFrontFuncIntoSubStage(const Function& func, SubStage& ss,
             func.getShaderType() != ss.shader_type) {
             return false;
         }
+        // One draw per RASTER substage
+        if (func.getShaderType() == RASTER) {
+            return false;
+        }
     }
 
     // A texelFetch consumer in this substage reads y from another pass;
@@ -67,7 +71,9 @@ bool PushFrontFuncIntoSubStage(const Function& func, SubStage& ss,
         if (IsInlineConst(x)) {
             continue;
         }
-        if (AccessOf(func, i) == InputAccess::TexelFetch) {
+        if (func.getShaderType() == RASTER) {
+            ss.vtx_vars.push_back(x);  // ordered: pos, attrib, faces
+        } else if (AccessOf(func, i) == InputAccess::TexelFetch) {
             PushUnique(ss.slt_vars, x);
         } else if (AccessOf(func, i) == InputAccess::Sampled) {
             PushUnique(ss.tex_vars, x);
@@ -255,6 +261,12 @@ Stages PackSubStagesIntoStages(SubStages substages,
         if (compatible &&
             (ss.shader_type != current.shader_type ||
              ss.img_size != current.img_size)) {
+            compatible = false;
+        }
+        // RASTER substages keep their own render pass (dedicated depth
+        // attachment and clear semantics)
+        if (compatible && (ss.shader_type == RASTER ||
+                           current.shader_type == RASTER)) {
             compatible = false;
         }
         if (compatible) {

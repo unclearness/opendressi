@@ -42,6 +42,23 @@ FetchContent_Declare(glfw
     GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(glfw)
 
+# Asset loaders for examples/tests (header-only usage)
+FetchContent_Declare(tinyobjloader
+    GIT_REPOSITORY https://github.com/tinyobjloader/tinyobjloader.git
+    GIT_TAG v2.0.0rc13
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR nonexistent_disable_add_subdirectory)
+FetchContent_MakeAvailable(tinyobjloader)
+FetchContent_Declare(stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG master
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR nonexistent_disable_add_subdirectory)
+FetchContent_MakeAvailable(stb)
+add_library(dressi_assets INTERFACE)
+target_include_directories(dressi_assets SYSTEM INTERFACE
+    "${tinyobjloader_SOURCE_DIR}" "${stb_SOURCE_DIR}")
+
 # ------------------------------------------------------------------------------
 # dressi_vkw: takiyu/VulkanWrapper compiled by our own target (its bundled
 # CMake/third_party predate CMake 4.x and current glslang, so we do not

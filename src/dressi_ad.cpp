@@ -229,7 +229,13 @@ void DressiAD::execStep() {
             im.substages = TrivialPackSubStages(exec_funcs);
         }
         for (auto& ss : im.substages) {
-            ss.shader_code = GenerateFragShader(ss);
+            if (ss.shader_type == RASTER) {
+                const RasterShaders shaders = GenerateRasterShaders(ss);
+                ss.vert_shader_code = shaders.vert;
+                ss.shader_code = shaders.frag;
+            } else {
+                ss.shader_code = GenerateFragShader(ss);
+            }
         }
     }
     if (im.init_status <= STAGE) {
@@ -253,8 +259,12 @@ void DressiAD::execStep() {
         im.plan_valid = true;
     }
 
-    // Flush pending CPU->GPU transfers now that images exist
+    // Flush pending CPU->GPU transfers now that images/buffers exist
     for (auto& [var, img] : im.pending_sends) {
+        if (auto it = im.plan.vtx_bufs.find(var);
+            it != im.plan.vtx_bufs.end()) {
+            SendGeometryToBuffer(*im.ctx, it->second, img, var.getVType());
+        }
         if (auto it = im.plan.imgs.find(var); it != im.plan.imgs.end()) {
             SendImageToDevice(*im.ctx, it->second, img, var.getVType(),
                               /*image_initialized=*/false);
@@ -282,14 +292,25 @@ void DressiAD::sendImg(const Variable& var, const CpuImage& cpu_img) {
     Variable v = var;
     v.setDirty(true);  // mark as changed
     if (im.plan_valid) {
+        bool uploaded = false;
+        if (auto it = im.plan.vtx_bufs.find(var);
+            it != im.plan.vtx_bufs.end()) {
+            im.ensureCtx();
+            SendGeometryToBuffer(*im.ctx, it->second, cpu_img,
+                                 var.getVType());
+            uploaded = true;
+        }
         if (auto it = im.plan.imgs.find(var); it != im.plan.imgs.end()) {
             im.ensureCtx();
             SendImageToDevice(*im.ctx, it->second, cpu_img, var.getVType(),
                               /*image_initialized=*/true);
+            uploaded = true;
+        }
+        if (uploaded) {
             return;
         }
     }
-    // Images do not exist yet; flush inside the next execStep()
+    // Images/buffers do not exist yet; flush inside the next execStep()
     im.pending_sends[var] = cpu_img;
 }
 

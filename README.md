@@ -11,7 +11,22 @@ framework specialized for differentiable rendering: computational graphs of
 number of Vulkan render passes (Reactive Shader Packing), and executed on
 any Vulkan-capable GPU. The public C++ API follows Appendix A of the paper.
 
-## Milestone 1 scope (this repository)
+## Milestone 2: deferred rasterization + texture optimization
+
+- `F::Rasterize(clip_pos, attrib, faces, screen_size)`: depth-tested indexed
+  rasterization of a vertex attribute into a screen-space image (G-buffer
+  channel; deferred shading per the paper). Non-differentiable with respect
+  to geometry (HardSoftRas triangle enlargement is a later milestone).
+- `F::Texture(tex, uv, inv_uv)`: nearest sampling, differentiable with
+  respect to the texture via the paper's inverse-UV lookup (the mesh
+  rasterized in UV space with screen positions as the attribute), with an
+  occlusion guard and on-the-fly dilation for chart-boundary texels.
+- `examples/texture_optimization`: multi-view unlit rendering of
+  `data/bunny`. GT views are rendered with the GT atlas; starting from a
+  black texture, the summed per-view MSE recovers the atlas on every texel
+  observed by any view (rendered loss converges to zero).
+
+## Milestone 1 scope
 
 - Graph core: `Variable` / `Function` handles over a shared node graph,
   type/size inference with `{1,1}` uniform broadcasting

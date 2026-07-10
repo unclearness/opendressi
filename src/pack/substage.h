@@ -20,7 +20,8 @@ struct SubStage {
     Variables out_vars;  // color attachments (outputs)
     Variables gen_vars;  // all variables generated inside the shader
     Functions funcs;     // fused functions, topologically ordered
-    std::string shader_code;
+    std::string shader_code;       // fragment shader
+    std::string vert_shader_code;  // RASTER only (pass-through VS)
 
     ShaderType shader_type = FRAG;
     ImgSize img_size = {1, 1};  // common output size

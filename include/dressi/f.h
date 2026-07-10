@@ -89,7 +89,25 @@ Variable Mean(const Variable& x);  // -> FLOAT, {1,1} (component average)
 Variable StopGradient(const Variable& x);
 Variable SetFragDepth(const Variable& depth);
 Variable PeelDepth(const Variable& frag_depth, const Variable& prev_frag_depth);
-Variable Rasterize(const Variable& vtx_pos, const Variable& vtx_attrib);
+
+// Rasterizes indexed triangles and interpolates a vertex attribute into a
+// screen-space image (depth-tested; background = 0). Non-differentiable
+// with respect to geometry in this milestone.
+//   vtx_clip_pos: VEC4 {V,1} clip-space positions
+//   vtx_attrib:   float scalar/vector {V,1} attribute to interpolate
+//   faces:        IVEC3 {F,1} triangle vertex indices
+Variable Rasterize(const Variable& vtx_clip_pos, const Variable& vtx_attrib,
+                   const Variable& faces, ImgSize screen_size);
+
+// Samples `tex` (nearest) at per-pixel `uv`. Differentiable with respect to
+// the texture through the inverse-UV lookup table `inv_uv`: a VEC4
+// {tex_size} image of (screen_x, screen_y, valid, 0) built by rasterizing
+// the mesh in UV space (see BuildInverseUV in the examples). The gradient
+// gathers from the screen-space gradient at inv_uv, rejecting texels whose
+// forward sampling disagrees (occlusion guard). Not differentiable with
+// respect to `uv`.
+Variable Texture(const Variable& tex, const Variable& uv,
+                 const Variable& inv_uv);
 
 }  // namespace F
 

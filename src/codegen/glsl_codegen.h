@@ -13,10 +13,20 @@ std::string FullscreenVertShader();
 
 // Generates the fragment shader for a substage: joins the GLSL snippets of
 // its functions with substage-local normalized names (v0..vN), declares the
-// classified inputs (slt -> sampler2D texelFetch), and writes the padded
-// color attachment outputs.
-// Binding convention: slt_vars occupy set=0, bindings [0, slt_count).
+// classified inputs, and writes the padded color attachment outputs.
+// Binding convention (shared with the executor), set=0:
+//   [0, n_inp)                       input attachments
+//   [n_inp, n_inp+n_tex)             texture samplers (UV sampling)
+//   [n_inp+n_tex, ...+n_slt)         sampler-less textures (texelFetch)
 std::string GenerateFragShader(const SubStage& substage);
+
+// Generates the pass-through vertex shader and the interpolation fragment
+// shader for a RASTER substage (one F::Rasterize function).
+struct RasterShaders {
+    std::string vert;
+    std::string frag;
+};
+RasterShaders GenerateRasterShaders(const SubStage& substage);
 
 // Physical channel count of an image for a VType (VEC3 pads to 4)
 uint32_t PhysChannels(VType vtype);

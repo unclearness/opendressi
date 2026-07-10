@@ -16,6 +16,9 @@ namespace dressi {
 struct GpuPlan {
     std::map<Variable, vkw::ImagePackPtr> imgs;
     std::map<Variable, vkw::TexturePackPtr> textures;  // nearest samplers
+    // Vertex/index buffers for RASTER inputs (leaf geometry data)
+    std::map<Variable, vkw::BufferPackPtr> vtx_bufs;
+    std::vector<vkw::ImagePackPtr> depth_imgs;  // one per RASTER stage
     std::vector<vkw::RenderPassPackPtr> render_passes;
     std::vector<vkw::FrameBufferPackPtr> frame_buffers;
     std::vector<vkw::PipelinePackPtr> pipelines;

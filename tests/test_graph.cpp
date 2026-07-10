@@ -106,8 +106,22 @@ TEST(Graph, AppendixStyleFunctionCtor) {
     EXPECT_EQ(gx, gy);
 }
 
-TEST(Graph, RasterizeThrowsInM1) {
+TEST(Graph, RasterizeValidatesInputs) {
     Variable pos(VEC4, {16, 1});
     Variable attrib(VEC3, {16, 1});
-    EXPECT_THROW(F::Rasterize(pos, attrib), DressiError);
+    Variable faces(IVEC3, {8, 1});
+    Variable g = F::Rasterize(pos, attrib, faces, {64, 64});
+    EXPECT_EQ(g.getVType(), VEC3);
+    EXPECT_EQ(g.getImgSize(), (ImgSize{64, 64}));
+    EXPECT_EQ(g.getCreator().getShaderType(), RASTER);
+
+    Variable bad_pos(VEC3, {16, 1});
+    EXPECT_THROW(F::Rasterize(bad_pos, attrib, faces, {64, 64}),
+                 DressiError);
+    Variable bad_faces(VEC3, {8, 1});
+    EXPECT_THROW(F::Rasterize(pos, attrib, bad_faces, {64, 64}),
+                 DressiError);
+    Variable mismatched(VEC3, {8, 1});
+    EXPECT_THROW(F::Rasterize(pos, mismatched, faces, {64, 64}),
+                 DressiError);
 }

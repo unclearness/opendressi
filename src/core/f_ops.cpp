@@ -1034,10 +1034,88 @@ Variable PeelDepth(const Variable& frag_depth,
     return MakeOp(std::move(desc), {frag_depth, prev_frag_depth});
 }
 
-Variable Rasterize(const Variable& /*vtx_pos*/, const Variable& /*vtx_attrib*/) {
-    DRESSI_CHECK(false,
-                 "F::Rasterize is not implemented in Milestone 1 "
-                 "(HardSoftRas milestone)");
+Variable Rasterize(const Variable& vtx_clip_pos, const Variable& vtx_attrib,
+                   const Variable& faces, ImgSize screen_size) {
+    DRESSI_CHECK(vtx_clip_pos.getVType() == VEC4 &&
+                         vtx_clip_pos.getImgSize().h == 1,
+                 "Rasterize: vtx_clip_pos must be VEC4 {V,1}");
+    const VType attr_type = vtx_attrib.getVType();
+    DRESSI_CHECK(!IsIntVType(attr_type) && !IsMatrixVType(attr_type),
+                 "Rasterize: attribute must be a float scalar/vector");
+    DRESSI_CHECK(vtx_attrib.getImgSize() == vtx_clip_pos.getImgSize(),
+                 "Rasterize: attribute count must match vertex count");
+    DRESSI_CHECK(faces.getVType() == IVEC3 && faces.getImgSize().h == 1,
+                 "Rasterize: faces must be IVEC3 {F,1}");
+
+    OpDesc desc;
+    desc.name = "Rasterize";
+    // Special-cased by the shader codegen (pass-through VS + interpolation)
+    desc.fwd_code = "__rasterize__";
+    desc.shader_type = RASTER;
+    desc.infer = [attr_type, screen_size](const Variables&)
+            -> std::pair<VType, ImgSize> { return {attr_type, screen_size}; };
+    desc.bwd = NullBwd;  // non-differentiable w.r.t. geometry (M2)
+    return MakeOp(std::move(desc), {vtx_clip_pos, vtx_attrib, faces});
+}
+
+namespace {
+
+// Gathers the screen-space gradient into texture space through the
+// inverse-UV table; texels whose forward sampling disagrees with the table
+// entry (occluded in this view) receive zero gradient.
+Variable GatherByInverseUV(const Variable& gy_screen, const Variable& inv_uv,
+                           const Variable& uv_screen) {
+    DRESSI_CHECK(inv_uv.getVType() == VEC4,
+                 "GatherByInverseUV: inv_uv must be VEC4");
+    OpDesc desc;
+    desc.name = "GatherByInverseUV";
+    // Special-cased by the shader codegen
+    desc.fwd_code = "__gather_inv_uv__";
+    desc.input_access = {InputAccess::TexelFetch, InputAccess::TexelFetch,
+                         InputAccess::TexelFetch};
+    desc.infer = [](const Variables& xs) -> std::pair<VType, ImgSize> {
+        return {xs[0].getVType(), xs[1].getImgSize()};
+    };
+    desc.bwd = NullBwd;
+    return MakeOp(std::move(desc), {gy_screen, inv_uv, uv_screen});
+}
+
+}  // namespace
+
+Variable Texture(const Variable& tex, const Variable& uv,
+                 const Variable& inv_uv) {
+    const VType tex_type = tex.getVType();
+    DRESSI_CHECK(!IsIntVType(tex_type) && !IsMatrixVType(tex_type),
+                 "Texture: texture must be a float image");
+    DRESSI_CHECK(!tex.getImgSize().isUniform(),
+                 "Texture: texture must be a non-uniform image");
+    DRESSI_CHECK(uv.getVType() == VEC2, "Texture: uv must be VEC2");
+    DRESSI_CHECK(inv_uv.getVType() == VEC4 &&
+                         inv_uv.getImgSize() == tex.getImgSize(),
+                 "Texture: inv_uv must be VEC4 of the texture size");
+
+    static const char* kSwizzles[] = {"", ".x", ".xy", ".xyz", ""};
+    const uint32_t n = NumComponents(tex_type);
+
+    OpDesc desc;
+    desc.name = "Texture";
+    desc.fwd_code = std::string("{y}=texture({s0},{x1})") +
+                    (n == 4 ? "" : kSwizzles[n]) + ";";
+    desc.input_access = {InputAccess::Sampled, InputAccess::SamePixel};
+    desc.infer = [tex_type](const Variables& xs)
+            -> std::pair<VType, ImgSize> {
+        return {tex_type, xs[1].getImgSize()};
+    };
+    // The backward graph references the inverse-UV table and the forward
+    // screen-space UVs through the closure (not forward inputs)
+    desc.bwd = [inv_uv](const Variables& xs, const Variable&,
+                        const Variable& gy, uint32_t bwd_idx) -> Variable {
+        if (bwd_idx != 0) {
+            return nullptr;  // not differentiable w.r.t. uv (M2)
+        }
+        return GatherByInverseUV(gy, inv_uv, xs[1]);
+    };
+    return MakeOp(std::move(desc), {tex, uv});
 }
 
 }  // namespace F

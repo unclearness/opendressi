@@ -33,7 +33,8 @@ gtest_discover_tests(test_vk_smoke PROPERTIES LABELS gpu)
 add_executable(dressi_tests_gpu
     test_executor_naive.cpp
     test_executor_rsp.cpp
-    test_reactive.cpp)
+    test_reactive.cpp
+    test_raster.cpp)
 target_link_libraries(dressi_tests_gpu PRIVATE dressi GTest::gtest_main)
 target_include_directories(dressi_tests_gpu PRIVATE ${CMAKE_SOURCE_DIR}/src)
 if(MSVC)

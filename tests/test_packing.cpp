@@ -144,20 +144,21 @@ TEST(Packing, RootsAreAlwaysExported) {
     EXPECT_TRUE(out_exported);
 }
 
-TEST(Packing, RasterShaderTypeHooks) {
-    // ShaderType::RASTER is a design hook in M1: nodes are constructible via
-    // the appendix-style Function ctor, packing never fuses them with FRAG
-    // functions, and the trivial packer rejects them as non-executable.
-    Variable vtx(VEC4, {16, 1});
-    Function raster_fn("{y}={x0};", RASTER,
-                       [](const Variables&, const Variable&, const Variable&,
-                          uint32_t) -> Variable { return nullptr; });
-    Variable screen = raster_fn.buildFwd({vtx});
-    EXPECT_EQ(raster_fn.getShaderType(), RASTER);
+TEST(Packing, RasterSubstagesStayIsolated) {
+    // A RASTER function gets its own substage and render pass: vertex
+    // inputs are classified as vtx_vars and never fused with FRAG functions.
+    Variable pos(VEC4, {16, 1});
+    Variable uv(VEC2, {16, 1});
+    Variable faces(IVEC3, {8, 1});
+    Variable g_uv = F::Rasterize(pos, uv, faces, {32, 32});
+    EXPECT_EQ(g_uv.getVType(), VEC2);
+    EXPECT_EQ(g_uv.getImgSize(), (ImgSize{32, 32}));
 
-    Variable shaded = F::Exp(screen);
+    Variable shaded = F::Exp(g_uv);
     Functions funcs = TraverseFuncs({shaded});
     Stages stages = GreedyPack(funcs, {shaded}, PackingLimits{});
+
+    bool found_raster = false;
     for (const auto& stage : stages) {
         for (const auto& ss : stage.substages) {
             bool has_raster = false;
@@ -167,10 +168,19 @@ TEST(Packing, RasterShaderTypeHooks) {
             }
             EXPECT_FALSE(has_raster && has_frag)
                     << "RASTER fused with FRAG functions";
+            if (has_raster) {
+                found_raster = true;
+                EXPECT_EQ(ss.funcs.size(), 1u);
+                ASSERT_EQ(ss.vtx_vars.size(), 3u);
+                EXPECT_EQ(ss.vtx_vars[0], pos);
+                EXPECT_EQ(ss.vtx_vars[1], uv);
+                EXPECT_EQ(ss.vtx_vars[2], faces);
+                EXPECT_EQ(stage.substages.size(), 1u)
+                        << "RASTER stage must not merge";
+            }
         }
     }
-
-    EXPECT_THROW(TrivialPackSubStages(funcs), DressiError);
+    EXPECT_TRUE(found_raster);
 }
 
 TEST(Packing, Determinism) {

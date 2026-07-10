@@ -16,21 +16,33 @@ SubStages TrivialPackSubStages(const Functions& all_funcs) {
         if (IsInlineConst(y)) {
             continue;  // constants are inlined into consumer shaders
         }
-        DRESSI_CHECK(func.getShaderType() == FRAG,
-                     "Only FRAG functions are executable in Milestone 1");
+        const ShaderType type = func.getShaderType();
+        DRESSI_CHECK(type == FRAG || type == RASTER,
+                     "COMP functions are not executable yet");
 
         SubStage ss;
         ss.funcs = {func};
         ss.out_vars = {y};
         ss.gen_vars = {y};
-        ss.shader_type = func.getShaderType();
+        ss.shader_type = type;
         ss.img_size = y.getImgSize();
-        for (const auto& x : func.getInputVars()) {
+        const Variables xs = func.getInputVars();
+        const auto& access = NodeAccess::Node(func)->input_access;
+        for (size_t i = 0; i < xs.size(); i++) {
+            const Variable& x = xs[i];
             if (IsInlineConst(x)) {
                 continue;
             }
-            if (std::find(ss.slt_vars.begin(), ss.slt_vars.end(), x) ==
-                ss.slt_vars.end()) {
+            if (type == RASTER) {
+                ss.vtx_vars.push_back(x);  // ordered: pos, attrib, faces
+            } else if (!access.empty() &&
+                       access[i] == InputAccess::Sampled) {
+                if (std::find(ss.tex_vars.begin(), ss.tex_vars.end(), x) ==
+                    ss.tex_vars.end()) {
+                    ss.tex_vars.push_back(x);
+                }
+            } else if (std::find(ss.slt_vars.begin(), ss.slt_vars.end(),
+                                 x) == ss.slt_vars.end()) {
                 ss.slt_vars.push_back(x);
             }
         }
@@ -43,7 +55,9 @@ Stages WrapSubStagesIntoStages(SubStages substages) {
     Stages stages;
     for (auto& ss : substages) {
         Stage stage;
+        stage.vtx_vars = ss.vtx_vars;
         stage.inp_vars = ss.inp_vars;
+        stage.tex_vars = ss.tex_vars;
         stage.slt_vars = ss.slt_vars;
         stage.out_vars = ss.out_vars;
         stage.shader_type = ss.shader_type;
