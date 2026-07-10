@@ -101,6 +101,67 @@ struct SoftScene {
     }
 };
 
+float EvalLoss(const Variable& loss, CpuEvaluator& ev) {
+    ev.clearCache();
+    return ev.eval(loss).data[0];
+}
+
+// Central finite differences vs the analytic gradient for `wrt`, with the
+// perturbation applied to `wrt_tensor` (re-bound each probe)
+void CheckGradAgainstFd(const Variable& loss, const SoftScene& scene,
+                        const Variable& wrt, CpuTensor wrt_tensor,
+                        const CpuTensor& target_tensor,
+                        const Variable& target, float h = 1e-3f,
+                        float rel_tol = 2e-2f, float abs_tol = 2e-3f) {
+    Variable wrt_mut = wrt;
+    wrt_mut.setRequiresGradRecursively();
+    auto [input_vars, input_grad_vars] = BuildBackward(loss);
+    Variable grad_var(nullptr);
+    for (size_t i = 0; i < input_vars.size(); i++) {
+        if (input_vars[i] == wrt) {
+            grad_var = input_grad_vars[i];
+        }
+    }
+    ASSERT_TRUE(grad_var);
+    ASSERT_EQ(grad_var.getVType(), wrt.getVType());
+    ASSERT_EQ(grad_var.getImgSize(), wrt.getImgSize());
+
+    CpuEvaluator ev;
+    scene.bind(ev);
+    ev.bind(target, target_tensor);
+    ev.bind(wrt, wrt_tensor);
+    const CpuTensor analytic = ev.eval(grad_var);
+
+    for (size_t i = 0; i < wrt_tensor.data.size(); i++) {
+        const float orig = wrt_tensor.data[i];
+        wrt_tensor.data[i] = orig + h;
+        ev.bind(wrt, wrt_tensor);
+        const float f_plus = EvalLoss(loss, ev);
+        wrt_tensor.data[i] = orig - h;
+        ev.bind(wrt, wrt_tensor);
+        const float f_minus = EvalLoss(loss, ev);
+        wrt_tensor.data[i] = orig;
+        ev.bind(wrt, wrt_tensor);
+
+        const float numeric = (f_plus - f_minus) / (2.f * h);
+        const float tol = abs_tol + rel_tol * std::abs(numeric);
+        EXPECT_NEAR(analytic.data[i], numeric, tol) << "component " << i;
+        if (i % 4 == 2) {  // clip z never influences the dist channel
+            EXPECT_FLOAT_EQ(analytic.data[i], 0.f);
+        }
+    }
+}
+
+// pred = coverage * sigmoid(dist / sigma), loss = Mean((target - pred)^2)
+Variable SilhouetteLoss(const SoftScene& scene, const Variable& target,
+                        float radius = kRadius) {
+    Variable out = scene.rasterize(radius);
+    Variable pred = F::StopGradient(F::GetW(out)) *
+                    F::Sigmoid(F::GetX(out) * (7.f / radius));
+    Variable diff = F::StopGradient(target) - pred;
+    return F::Mean(diff * diff);
+}
+
 }  // namespace
 
 TEST(SoftRas, ForwardDistProfile) {
@@ -148,4 +209,37 @@ TEST(SoftRas, DepthShiftNearWins) {
     const size_t o = (size_t(6) * kScreen + 6) * 4;
     EXPECT_FLOAT_EQ(out.data[o + 1], 1.f);       // near face id
     EXPECT_NEAR(out.data[o + 2], 0.2f, 1e-5f);   // near hard z
+}
+
+TEST(SoftRas, DistGradMatchesFiniteDifferences) {
+    // Generic-position triangle (edges avoid pixel centers), w = 1
+    SoftScene scene({ClipOfScreen(4.3f, 3.8f, 0.5f),
+                     ClipOfScreen(12.4f, 5.2f, 0.5f),
+                     ClipOfScreen(5.1f, 12.6f, 0.5f)},
+                    {{0, 1, 2}}, 1.6f);
+    Variable target(FLOAT, {kScreen, kScreen});
+    CpuTensor t_target = MakeTensor(
+            FLOAT, {kScreen, kScreen},
+            std::vector<float>(size_t(kScreen) * kScreen, 0.f));
+    for (size_t i = 0; i < t_target.data.size(); i++) {
+        t_target.data[i] = 0.2f + 0.5f * float(i % 3);
+    }
+    Variable loss = SilhouetteLoss(scene, target);
+    CheckGradAgainstFd(loss, scene, scene.hard_clip, scene.t_hard_clip,
+                       t_target, target);
+}
+
+TEST(SoftRas, DistGradPerspectiveW) {
+    // One vertex at w = 1.3 exercises the -x/w^2 Jacobian terms
+    auto v1 = ClipOfScreen(12.4f, 5.2f, 0.5f, 1.3f);
+    SoftScene scene({ClipOfScreen(4.3f, 3.8f, 0.5f), v1,
+                     ClipOfScreen(5.1f, 12.6f, 0.5f)},
+                    {{0, 1, 2}}, 1.6f);
+    Variable target(FLOAT, {kScreen, kScreen});
+    CpuTensor t_target = MakeTensor(
+            FLOAT, {kScreen, kScreen},
+            std::vector<float>(size_t(kScreen) * kScreen, 0.4f));
+    Variable loss = SilhouetteLoss(scene, target);
+    CheckGradAgainstFd(loss, scene, scene.hard_clip, scene.t_hard_clip,
+                       t_target, target);
 }

@@ -141,7 +141,8 @@ std::string GenerateFragShader(const SubStage& ss) {
         const std::string& code = NodeAccess::Node(f)->fwd_code;
         return code == "__reduce_2x2_sum__" ||
                code == "__upsample_nearest_2x__" ||
-               code == "__gather_inv_uv__";
+               code == "__gather_inv_uv__" ||
+               code == "__gather_dist_grad__";
     };
     std::map<Variable, size_t> slt_binding;
     for (size_t i = 0; i < ss.slt_vars.size(); i++) {
@@ -282,6 +283,92 @@ std::string GenerateFragShader(const SubStage& ss) {
             body << "                if (st == dressi_coord) { " << y_name
                  << " = texelFetch(u_slt" << gy_bind << ", sp, 0)"
                  << SwizzleOf(n) << "; dy = 4; break; }\n";
+            body << "            }\n";
+            body << "        }\n";
+            body << "    }\n";
+            continue;
+        }
+
+        if (node->fwd_code == "__gather_dist_grad__") {
+            // xs = {gy_screen, raster_out, vtx_clip_tex, faces_tex}; output
+            // texel = hard vertex. Gathers gy.x * d dist / d clip over every
+            // covered pixel of faces containing this vertex (the scatter-
+            // free formulation of the HardSoftRas backward).
+            const size_t gy_bind = slt_binding.at(xs[0]);
+            const size_t ro_bind = slt_binding.at(xs[1]);
+            const size_t cl_bind = slt_binding.at(xs[2]);
+            const size_t fc_bind = slt_binding.at(xs[3]);
+            const ImgSize scr = xs[1].getImgSize();
+            body << "    vec4 " << y_name << " = vec4(0.0);\n";
+            body << "    {\n";
+            body << "        int vid = dressi_coord.x;\n";
+            body << "        vec4 vc = texelFetch(u_slt" << cl_bind
+                 << ", ivec2(vid, 0), 0);\n";
+            body << "        for (int py = 0; py < " << scr.h
+                 << "; py++)\n";
+            body << "        for (int px = 0; px < " << scr.w
+                 << "; px++) {\n";
+            body << "            ivec2 sp = ivec2(px, py);\n";
+            body << "            vec4 ro = texelFetch(u_slt" << ro_bind
+                 << ", sp, 0);\n";
+            body << "            if (ro.w < 0.5) continue;\n";
+            body << "            float g = texelFetch(u_slt" << gy_bind
+                 << ", sp, 0).x;\n";
+            body << "            if (g == 0.0) continue;\n";
+            body << "            vec3 fidx = texelFetch(u_slt" << fc_bind
+                 << ", ivec2(int(ro.y + 0.5), 0), 0).xyz;\n";
+            body << "            ivec3 vi = ivec3(fidx + 0.5);\n";
+            body << "            if (vid != vi.x && vid != vi.y"
+                    " && vid != vi.z) continue;\n";
+            body << "            vec2 s[3];\n";
+            body << "            for (int k = 0; k < 3; k++) {\n";
+            body << "                vec4 c = texelFetch(u_slt" << cl_bind
+                 << ", ivec2(vi[k], 0), 0);\n";
+            body << "                s[k] = (c.xy / c.w * 0.5 + 0.5) * vec2("
+                 << scr.w << ".0, " << scr.h << ".0);\n";
+            body << "            }\n";
+            body << "            vec2 p = vec2(sp) + 0.5;\n";
+            // Argmin edge of the signed distance (same as the forward)
+            body << "            float best_d2 = -1.0; int be = 0;"
+                    " float bt = 0.0; int npos = 0; int nneg = 0;\n";
+            body << "            for (int k = 0; k < 3; k++) {\n";
+            body << "                vec2 a = s[k];"
+                    " vec2 b = s[(k + 1) % 3];\n";
+            body << "                vec2 e = b - a;"
+                    " float len2 = dot(e, e);\n";
+            body << "                float t = len2 > 1e-12 ?"
+                    " clamp(dot(p - a, e) / len2, 0.0, 1.0) : 0.0;\n";
+            body << "                vec2 q = a + t * e;"
+                    " float d2 = dot(p - q, p - q);\n";
+            body << "                if (best_d2 < 0.0 || d2 < best_d2)"
+                    " { best_d2 = d2; be = k; bt = t; }\n";
+            body << "                float cr = e.x * (p.y - a.y)"
+                    " - e.y * (p.x - a.x);\n";
+            body << "                if (cr >= 0.0) npos++;\n";
+            body << "                if (cr <= 0.0) nneg++;\n";
+            body << "            }\n";
+            body << "            float d = sqrt(max(best_d2, 0.0));\n";
+            body << "            if (d < 1e-6) continue;\n";
+            body << "            float sgn ="
+                    " (npos == 3 || nneg == 3) ? 1.0 : -1.0;\n";
+            body << "            int ia = be; int ib = (be + 1) % 3;\n";
+            body << "            vec2 q = s[ia]"
+                    " + bt * (s[ib] - s[ia]);\n";
+            body << "            vec2 n = (p - q) / d;\n";
+            // d dist / d s[ia] = -sgn (1-t) n, d dist / d s[ib] = -sgn t n
+            body << "            for (int e2 = 0; e2 < 2; e2++) {\n";
+            body << "                int k = e2 == 0 ? ia : ib;\n";
+            body << "                if (vi[k] != vid) continue;\n";
+            body << "                float wgt = e2 == 0"
+                    " ? (1.0 - bt) : bt;\n";
+            body << "                vec2 gs = g * (-sgn * wgt) * n;\n";
+            body << "                " << y_name << ".x += gs.x * 0.5 * "
+                 << scr.w << ".0 / vc.w;\n";
+            body << "                " << y_name << ".y += gs.y * 0.5 * "
+                 << scr.h << ".0 / vc.w;\n";
+            body << "                " << y_name << ".w += -(gs.x * 0.5 * "
+                 << scr.w << ".0 * vc.x + gs.y * 0.5 * " << scr.h
+                 << ".0 * vc.y) / (vc.w * vc.w);\n";
             body << "            }\n";
             body << "        }\n";
             body << "    }\n";

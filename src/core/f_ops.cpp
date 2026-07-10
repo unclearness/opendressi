@@ -1074,6 +1074,91 @@ Variable Rasterize(const Variable& vtx_clip_pos, const Variable& vtx_attrib,
     return MakeOp(std::move(desc), {vtx_clip_pos, vtx_attrib, faces});
 }
 
+namespace {
+
+// Screen->vertex gradient gather for RasterizeSoft's dist channel: for each
+// hard vertex, sums gy.x * d dist / d clip over all covered pixels of faces
+// containing it (argmin edge + envelope theorem; screen->clip Jacobian with
+// the 1/w terms, z gradient is exactly zero).
+Variable GatherDistGrad(const Variable& gy_screen, const Variable& raster_out,
+                        const Variable& vtx_clip_tex,
+                        const Variable& faces_tex) {
+    OpDesc desc;
+    desc.name = "GatherDistGrad";
+    // Special-cased by the shader codegen
+    desc.fwd_code = "__gather_dist_grad__";
+    desc.input_access = {InputAccess::TexelFetch, InputAccess::TexelFetch,
+                         InputAccess::TexelFetch, InputAccess::TexelFetch};
+    desc.infer = [](const Variables& xs) -> std::pair<VType, ImgSize> {
+        return {VEC4, xs[2].getImgSize()};
+    };
+    desc.bwd = NullBwd;
+    desc.cpu = [](const std::vector<CpuTensor>& xs) {
+        const CpuTensor& gy = xs[0];
+        const CpuTensor& ro = xs[1];
+        const CpuTensor& clip = xs[2];
+        const CpuTensor& faces = xs[3];
+        const ImgSize screen = ro.size;
+        CpuTensor out;
+        out.vtype = VEC4;
+        out.size = clip.size;
+        out.data.assign(size_t(clip.size.w) * 4, 0.f);
+        const float w_scr = float(screen.w);
+        const float h_scr = float(screen.h);
+        for (uint32_t y = 0; y < screen.h; y++) {
+            for (uint32_t x = 0; x < screen.w; x++) {
+                const size_t o = (size_t(y) * screen.w + x) * 4;
+                if (ro.data[o + 3] < 0.5f) {
+                    continue;  // background
+                }
+                const float g = gy.data[o + 0];
+                if (g == 0.f) {
+                    continue;
+                }
+                const uint32_t f = uint32_t(int64_t(ro.data[o + 1] + 0.5f));
+                uint32_t idx[3];
+                float s[3][2];
+                bool valid = true;
+                for (int k = 0; k < 3; k++) {
+                    idx[k] = uint32_t(int64_t(
+                            faces.data[size_t(f) * 3 + k] + 0.5f));
+                    if (!ProjectClipToScreen(&clip.data[size_t(idx[k]) * 4],
+                                             screen, s[k], nullptr)) {
+                        valid = false;
+                        break;
+                    }
+                }
+                if (!valid) {
+                    continue;
+                }
+                const float p[2] = {float(x) + 0.5f, float(y) + 0.5f};
+                const TriDist td = SignedDistToTri(p, s);
+                float g_s[3][2];
+                SignedDistGradToTri(p, s, td, g_s);
+                for (int k = 0; k < 3; k++) {
+                    const float gsx = g * g_s[k][0];
+                    const float gsy = g * g_s[k][1];
+                    if (gsx == 0.f && gsy == 0.f) {
+                        continue;
+                    }
+                    const float* c = &clip.data[size_t(idx[k]) * 4];
+                    float* dst = &out.data[size_t(idx[k]) * 4];
+                    dst[0] += gsx * 0.5f * w_scr / c[3];
+                    dst[1] += gsy * 0.5f * h_scr / c[3];
+                    dst[3] += -(gsx * 0.5f * w_scr * c[0] +
+                                gsy * 0.5f * h_scr * c[1]) /
+                              (c[3] * c[3]);
+                }
+            }
+        }
+        return out;
+    };
+    return MakeOp(std::move(desc),
+                  {gy_screen, raster_out, vtx_clip_tex, faces_tex});
+}
+
+}  // namespace
+
 Variable RasterizeSoft(const Variable& vtx_clip_soft, const Variable& face_id,
                        const Variable& faces_soft,
                        const Variable& vtx_clip_hard_tex,
@@ -1114,7 +1199,15 @@ Variable RasterizeSoft(const Variable& vtx_clip_soft, const Variable& face_id,
         return RasterizeSoftCpu(xs[0], xs[1], xs[2], xs[3], xs[4],
                                 screen_size, radius_px);
     };
-    desc.bwd = NullBwd;  // dist-channel backward wired below (GatherDistGrad)
+    // Only the dist channel is differentiable, and only w.r.t. the hard
+    // clip positions; coverage/face_id/depth are piecewise constant in them
+    desc.bwd = [](const Variables& xs, const Variable& y, const Variable& gy,
+                  uint32_t bwd_idx) -> Variable {
+        if (bwd_idx != 3) {
+            return nullptr;
+        }
+        return GatherDistGrad(gy, y, xs[3], xs[4]);
+    };
     return MakeOp(std::move(desc),
                   {vtx_clip_soft, face_id, faces_soft, vtx_clip_hard_tex,
                    faces_tex});
