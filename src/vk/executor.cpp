@@ -21,6 +21,7 @@ vkw::ImagePackPtr CreateVarImage(const VkContext& ctx, const Variable& var) {
             vk::ImageUsageFlagBits::eColorAttachment |
                     vk::ImageUsageFlagBits::eInputAttachment |
                     vk::ImageUsageFlagBits::eSampled |
+                    vk::ImageUsageFlagBits::eStorage |
                     vk::ImageUsageFlagBits::eTransferSrc |
                     vk::ImageUsageFlagBits::eTransferDst,
             vk::MemoryPropertyFlagBits::eDeviceLocal);
@@ -323,7 +324,9 @@ GpuPlan BuildGpuPlan(const VkContext& ctx, const Stages& stages,
             n_fn += ss.funcs.size();
         }
         return fmt::format("{} {}x{} ss={} fn={} i={} s={} o={} [{}]",
-                           stage.shader_type == RASTER ? "R" : "F",
+                           stage.shader_type == RASTER ? "R"
+                           : stage.shader_type == COMP ? "C"
+                                                       : "F",
                            stage.img_size.w, stage.img_size.h,
                            stage.substages.size(), n_fn, n_inp, n_slt, n_out,
                            funcs);
@@ -488,6 +491,104 @@ GpuPlan BuildGpuPlan(const VkContext& ctx, const Stages& stages,
         copy_imgs_to_uif_bufs(uif_after_stage[si]);
     };
 
+    // Records one COMP stage: a single dispatch (one invocation per pixel,
+    // 64-wide groups along the row). Inputs are samplers (inp = same-pixel
+    // texelFetch, slt = arbitrary texelFetch), outputs storage images in
+    // eGeneral during the dispatch, transitioned back for sampled reads.
+    const auto record_comp_stage = [&](const Stage& stage) {
+        DRESSI_CHECK(stage.substages.size() == 1,
+                     "COMP stages hold one substage");
+        const SubStage& ss = stage.substages[0];
+        auto comp_module = ctx.glsl_compiler->compileFromString(
+                ctx.device, ss.shader_code, vk::ShaderStageFlagBits::eCompute);
+
+        // Binding convention shared with the codegen: inp, slt, uif, out
+        std::vector<vkw::DescSetInfo> binding_infos;
+        const size_t n_samplers = ss.inp_vars.size() + ss.slt_vars.size();
+        for (size_t i = 0; i < n_samplers; i++) {
+            binding_infos.emplace_back(
+                    vk::DescriptorType::eCombinedImageSampler, 1,
+                    vk::ShaderStageFlagBits::eCompute);
+        }
+        for (size_t i = 0; i < ss.uif_vars.size(); i++) {
+            binding_infos.emplace_back(vk::DescriptorType::eUniformBuffer, 1,
+                                       vk::ShaderStageFlagBits::eCompute);
+        }
+        for (size_t i = 0; i < ss.out_vars.size(); i++) {
+            binding_infos.emplace_back(vk::DescriptorType::eStorageImage, 1,
+                                       vk::ShaderStageFlagBits::eCompute);
+        }
+        auto desc_set = vkw::CreateDescriptorSetPack(ctx.device,
+                                                     binding_infos);
+        auto write_pack = vkw::CreateWriteDescSetPack();
+        uint32_t binding = 0;
+        for (const Variables* sampled : {&ss.inp_vars, &ss.slt_vars}) {
+            for (const auto& v : *sampled) {
+                ensure_texture(v);
+                vkw::AddWriteDescSet(
+                        write_pack, desc_set, binding++,
+                        {plan.textures.at(v)},
+                        {vk::ImageLayout::eShaderReadOnlyOptimal});
+            }
+        }
+        for (const auto& v : ss.uif_vars) {
+            vkw::AddWriteDescSet(write_pack, desc_set, binding++,
+                                 {plan.uif_bufs.at(v)});
+        }
+        for (const auto& v : ss.out_vars) {
+            vkw::AddWriteDescSet(write_pack, desc_set, binding++,
+                                 {plan.imgs.at(v)},
+                                 {vk::ImageLayout::eGeneral});
+        }
+        vkw::UpdateDescriptorSets(ctx.device, write_pack);
+        plan.desc_sets.push_back(desc_set);
+
+        auto pipeline = vkw::CreateComputePipeline(ctx.device, comp_module,
+                                                   {desc_set});
+        plan.pipelines.push_back(pipeline);
+
+        // Outputs -> eGeneral for storage writes (one batched barrier).
+        // eUndefined source keeps the recorded transition valid on the
+        // first execution too; the dispatch overwrites every pixel.
+        const auto out_barriers = [&](vk::ImageLayout from, vk::ImageLayout to,
+                                      vk::PipelineStageFlags src_stage,
+                                      vk::AccessFlags src_access,
+                                      vk::PipelineStageFlags dst_stage,
+                                      vk::AccessFlags dst_access) {
+            std::vector<vk::ImageMemoryBarrier> barriers;
+            for (const auto& v : ss.out_vars) {
+                const auto& img = plan.imgs.at(v);
+                const vk::ImageSubresourceRange range(
+                        img->view_aspects, img->view_miplevel_base,
+                        img->view_miplevel_cnt, 0, 1);
+                barriers.emplace_back(src_access, dst_access, from, to,
+                                      VK_QUEUE_FAMILY_IGNORED,
+                                      VK_QUEUE_FAMILY_IGNORED,
+                                      img->img_res_pack->img.get(), range);
+            }
+            cmd->pipelineBarrier(src_stage, dst_stage, {}, nullptr, nullptr,
+                                 barriers);
+        };
+        out_barriers(vk::ImageLayout::eUndefined, vk::ImageLayout::eGeneral,
+                     vk::PipelineStageFlagBits::eTopOfPipe, {},
+                     vk::PipelineStageFlagBits::eComputeShader,
+                     vk::AccessFlagBits::eShaderWrite);
+        vkw::CmdBindPipeline(cmd, pipeline, vk::PipelineBindPoint::eCompute);
+        vkw::CmdBindDescSets(cmd, pipeline, {desc_set}, {},
+                             vk::PipelineBindPoint::eCompute);
+        vkw::CmdDispatch(cmd, (stage.img_size.w + 63) / 64,
+                         stage.img_size.h);
+        out_barriers(vk::ImageLayout::eGeneral,
+                     vk::ImageLayout::eShaderReadOnlyOptimal,
+                     vk::PipelineStageFlagBits::eComputeShader,
+                     vk::AccessFlagBits::eShaderWrite,
+                     vk::PipelineStageFlagBits::eFragmentShader |
+                             vk::PipelineStageFlagBits::eComputeShader |
+                             vk::PipelineStageFlagBits::eTransfer,
+                     vk::AccessFlagBits::eShaderRead |
+                             vk::AccessFlagBits::eTransferRead);
+    };
+
     for (size_t stage_idx = 0; stage_idx < stages.size(); stage_idx++) {
         const Stage& stage = stages[stage_idx];
         if (stage.shader_type == RASTER) {
@@ -496,8 +597,14 @@ GpuPlan BuildGpuPlan(const VkContext& ctx, const Stages& stages,
             ts_mark(stage_label(stage));
             continue;
         }
+        if (stage.shader_type == COMP) {
+            record_comp_stage(stage);
+            record_uif_copies(stage_idx);
+            ts_mark(stage_label(stage));
+            continue;
+        }
         DRESSI_CHECK(stage.shader_type == FRAG,
-                     "COMP stages are not executable yet");
+                     "unknown stage shader type");
 
         // Aliased updates written by this stage (input+color, one image)
         std::map<Variable, Variable> stage_alias;  // updated -> input

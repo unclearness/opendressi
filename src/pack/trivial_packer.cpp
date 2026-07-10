@@ -17,8 +17,6 @@ SubStages TrivialPackSubStages(const Functions& all_funcs) {
             continue;  // constants are inlined into consumer shaders
         }
         const ShaderType type = func.getShaderType();
-        DRESSI_CHECK(type == FRAG || type == RASTER,
-                     "COMP functions are not executable yet");
 
         SubStage ss;
         ss.funcs = {func};

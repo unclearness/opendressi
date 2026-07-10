@@ -334,6 +334,8 @@ void DressiAD::execStep() {
                 const RasterShaders shaders = GenerateRasterShaders(ss);
                 ss.vert_shader_code = shaders.vert;
                 ss.shader_code = shaders.frag;
+            } else if (ss.shader_type == COMP) {
+                ss.shader_code = GenerateCompShader(ss);
             } else {
                 ss.shader_code = GenerateFragShader(ss);
             }
@@ -386,6 +388,34 @@ void DressiAD::execStep() {
                 "({} funcs)",
                 int(entry_status), im.stages.size(), getSubStageCount(),
                 im.all_funcs.size());
+        // DRESSI_DUMP_STAGES=1: per-substage packing detail (perf analysis)
+        if (const char* dump = std::getenv("DRESSI_DUMP_STAGES");
+            dump && dump[0] == '1') {
+            for (size_t si = 0; si < im.stages.size(); si++) {
+                const Stage& st = im.stages[si];
+                spdlog::info("[dressi] stage {} type={} {}x{}", si,
+                             int(st.shader_type), st.img_size.w,
+                             st.img_size.h);
+                for (size_t k = 0; k < st.substages.size(); k++) {
+                    const SubStage& ss = st.substages[k];
+                    std::string funcs;
+                    for (const auto& f : ss.funcs) {
+                        funcs += NodeAccess::Node(f)->name + " ";
+                    }
+                    std::string outs;
+                    for (const auto& v : ss.out_vars) {
+                        outs += std::to_string(v.id()) + " ";
+                    }
+                    std::string inps;
+                    for (const auto& v : ss.inp_vars) {
+                        inps += std::to_string(v.id()) + " ";
+                    }
+                    spdlog::info(
+                            "[dressi]   ss{} fn={} inp=[{}] out=[{}] : {}",
+                            k, ss.funcs.size(), inps, outs, funcs);
+                }
+            }
+        }
     }
     timer.report(entry_status < FINISHED ? "execStep(rebuild)"
                                          : "execStep(cached)");

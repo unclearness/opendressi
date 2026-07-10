@@ -18,7 +18,14 @@ std::string FullscreenVertShader();
 //   [0, n_inp)                       input attachments
 //   [n_inp, n_inp+n_tex)             texture samplers (UV sampling)
 //   [n_inp+n_tex, ...+n_slt)         sampler-less textures (texelFetch)
+//   [...+n_slt, ...+n_uif)           vec4 UBOs ({1,1} leaf uniforms)
 std::string GenerateFragShader(const SubStage& substage);
+
+// Compute variant for COMP substages (band-pass gathers): all inputs are
+// texelFetch samplers / UBOs (no input attachments), outputs are writeonly
+// storage images bound after the uif UBOs; one invocation per pixel
+// (local_size_x = 64 along the row).
+std::string GenerateCompShader(const SubStage& substage);
 
 // Generates the pass-through vertex shader and the interpolation fragment
 // shader for a RASTER substage (one F::Rasterize function).

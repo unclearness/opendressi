@@ -1185,6 +1185,11 @@ Variable GatherDistGrad(const Variable& gy_screen, const Variable& raster_out,
                         const Variable& vtx_faces_tex, float radius_px) {
     OpDesc desc;
     desc.name = "GatherDistGrad";
+    // COMP keeps the compute-substage path exercised by the exact-backward
+    // tests; the hot stochastic ops stay FRAG -- measured on this GPU,
+    // graphics<->compute switches and lost elementwise fusion cost more
+    // than the render passes they remove (log/202607102000 follow-up)
+    desc.shader_type = COMP;
     // Special-cased by the shader codegen; the enlargement radius rides on
     // the marker so the shader can bound each vertex's pixel scan by the
     // exact soft-triangle bbox of its incident faces (from vtx_faces_tex)

@@ -73,16 +73,23 @@ void main() {
 )";
 }
 
-std::string GenerateFragShader(const SubStage& ss) {
-    // FRAG substages, or raster-headed substages (a RASTER function at the
+namespace {
+
+std::string GenerateShaderImpl(const SubStage& ss, bool comp) {
+    // FRAG substages, raster-headed substages (a RASTER function at the
     // top followed by fused FRAG functions -- the paper's "same shader
-    // types except for top rasterization")
+    // types except for top rasterization"), or COMP substages (all inputs
+    // texelFetch/UBO, outputs storage images).
     const bool raster_headed = ss.shader_type == RASTER;
-    DRESSI_CHECK(ss.shader_type == FRAG || raster_headed,
-                 "GenerateFragShader: FRAG or raster-headed only");
+    DRESSI_CHECK(comp ? ss.shader_type == COMP
+                      : (ss.shader_type == FRAG || raster_headed),
+                 "GenerateShaderImpl: substage/shader type mismatch");
     if (raster_headed) {
         DRESSI_CHECK(ss.inp_vars.empty() && ss.tex_vars.empty(),
                      "Raster-headed substages support slt/uif inputs only");
+    } else if (comp) {
+        DRESSI_CHECK(ss.tex_vars.empty() && ss.vtx_vars.empty(),
+                     "COMP substages support inp/slt/uif inputs only");
     } else {
         DRESSI_CHECK(ss.vtx_vars.empty(),
                      "Codegen supports inp/tex/slt inputs only");
@@ -105,14 +112,26 @@ std::string GenerateFragShader(const SubStage& ss) {
     std::ostringstream head;
     std::ostringstream body;
     head << "#version 450\n";
+    if (comp) {
+        head << "layout(local_size_x = 64, local_size_y = 1, "
+                "local_size_z = 1) in;\n";
+    }
 
-    // Binding convention shared with the executor: inp first, then slt
+    // Binding convention shared with the executor: inp first, then slt.
+    // COMP has no input attachments; inp inputs are samplers read by
+    // texelFetch at the invocation coordinate.
     for (size_t i = 0; i < ss.inp_vars.size(); i++) {
         const Variable& v = ss.inp_vars[i];
         DRESSI_CHECK(!IsIntVType(v.getVType()),
                      "Int images are not supported on GPU yet (M1)");
-        head << "layout(input_attachment_index=" << i << ", set=0, binding="
-             << i << ") uniform subpassInput u_inp" << i << ";\n";
+        if (comp) {
+            head << "layout(set=0, binding=" << i
+                 << ") uniform sampler2D u_inp" << i << ";\n";
+        } else {
+            head << "layout(input_attachment_index=" << i
+                 << ", set=0, binding=" << i << ") uniform subpassInput u_inp"
+                 << i << ";\n";
+        }
     }
     // tex inputs: samplers accessed with UV coordinates via texture()
     const size_t tex_binding_ofs = ss.inp_vars.size();
@@ -151,14 +170,24 @@ std::string GenerateFragShader(const SubStage& ss) {
              << " v_attr;\n";
     }
 
-    // Outputs: padded float attachments
+    // Outputs: padded float attachments (FRAG) or storage images (COMP,
+    // bound after the uif UBOs)
     for (size_t i = 0; i < ss.out_vars.size(); i++) {
         const uint32_t phys = PhysChannels(ss.out_vars[i].getVType());
         DRESSI_CHECK(ss.out_vars[i].getImgSize() == ss.img_size,
                      "Substage outputs must share the image size");
-        head << "layout(location=" << i << ") out "
-             << (phys == 1 ? "float" : ("vec" + std::to_string(phys)))
-             << " o_" << i << ";\n";
+        if (comp) {
+            const char* fmt = phys == 1 ? "r32f"
+                              : phys == 2 ? "rg32f"
+                                          : "rgba32f";
+            head << "layout(set=0, binding="
+                 << (uif_binding_ofs + ss.uif_vars.size() + i) << ", " << fmt
+                 << ") uniform writeonly image2D u_out" << i << ";\n";
+        } else {
+            head << "layout(location=" << i << ") out "
+                 << (phys == 1 ? "float" : ("vec" + std::to_string(phys)))
+                 << " o_" << i << ";\n";
+        }
     }
 
     // Shared helper for the screen-space AA ops (Dr.Hair Eq.4-5): the
@@ -258,7 +287,13 @@ bool dressi_aa_pair(sampler2D tri, sampler2D vclip, sampler2D faces,
     }
 
     body << "void main() {\n";
-    body << "    ivec2 dressi_coord = ivec2(gl_FragCoord.xy);\n";
+    if (comp) {
+        body << "    ivec2 dressi_coord = ivec2(gl_GlobalInvocationID.xy);\n";
+        body << "    if (dressi_coord.x >= " << ss.img_size.w
+             << " || dressi_coord.y >= " << ss.img_size.h << ") return;\n";
+    } else {
+        body << "    ivec2 dressi_coord = ivec2(gl_FragCoord.xy);\n";
+    }
 
     // Which slt inputs are consumed by coordinate-generic loads (special ops
     // fetch their input themselves)
@@ -312,7 +347,8 @@ bool dressi_aa_pair(sampler2D tri, sampler2D vclip, sampler2D faces,
         const Variable& v = ss.inp_vars[i];
         const uint32_t n = NumComponents(v.getVType());
         body << "    " << GlslTypeName(v.getVType()) << " " << local_name(v)
-             << " = subpassLoad(u_inp" << i << ")" << SwizzleOf(n) << ";\n";
+             << (comp ? " = texelFetch(u_inp" : " = subpassLoad(u_inp") << i
+             << (comp ? ", dressi_coord, 0)" : ")") << SwizzleOf(n) << ";\n";
     }
 
     // Generic loads for slt inputs (skipped when the same variable is
@@ -1302,7 +1338,19 @@ bool dressi_aa_pair(sampler2D tri, sampler2D vclip, sampler2D faces,
         const uint32_t n = NumComponents(v.getVType());
         const uint32_t phys = PhysChannels(v.getVType());
         const std::string src = names.at(v);
-        if (n == phys) {
+        if (comp) {
+            // imageStore always takes a vec4; extra components are ignored
+            // by narrower formats
+            body << "    imageStore(u_out" << i << ", dressi_coord, ";
+            if (n == 1) {
+                body << "vec4(" << src << ", 0.0, 0.0, 0.0)";
+            } else if (n == 4) {
+                body << src;
+            } else {
+                body << "vec4(" << src << (n == 2 ? ", 0.0, 0.0)" : ", 0.0)");
+            }
+            body << ");\n";
+        } else if (n == phys) {
             body << "    o_" << i << " = " << src << ";\n";
         } else {  // VEC3 -> vec4 padding
             body << "    o_" << i << " = vec4(" << src << ", 0.0);\n";
@@ -1311,6 +1359,16 @@ bool dressi_aa_pair(sampler2D tri, sampler2D vclip, sampler2D faces,
     body << "}\n";
 
     return head.str() + body.str();
+}
+
+}  // namespace
+
+std::string GenerateFragShader(const SubStage& ss) {
+    return GenerateShaderImpl(ss, /*comp=*/false);
+}
+
+std::string GenerateCompShader(const SubStage& ss) {
+    return GenerateShaderImpl(ss, /*comp=*/true);
 }
 
 RasterShaders GenerateRasterShaders(const SubStage& ss) {

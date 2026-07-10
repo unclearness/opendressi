@@ -48,8 +48,9 @@ inputs changed (reactive cache).
   mirrors and cpu_funcs).
 - `pack/` — SubStage/Stage IR, `trivial_packer` (1 func = 1 pass, the
   correctness baseline; `DressiAD::setPackingMode`), `greedy_packer` (RSP:
-  back-to-front greedy fusion under Vulkan limits), `reactive.cpp` (prunes
-  clean cached branches).
+  back-to-front greedy fusion under Vulkan limits, then
+  `RematerializeSubStages` clones cheap producer chains into consumers
+  and drops dead outputs), `reactive.cpp` (prunes clean cached branches).
 - `codegen/` — substage → GLSL fragment shader (`{y}`/`{x0}`/`{s0}` snippet
   markers, substage-local `v0..vN` names for golden tests and shader-cache
   hits); special-cased ops by marker string (`__reduce_2x2_sum__`,
@@ -116,8 +117,19 @@ inputs changed (reactive cache).
   GPU-generated `{1,1}` scalars stay `texelFetch(0,0)` slt reads — the
   mid-frame UBO refresh copies measured slower than the broadcast fetch
   they replace (documented in log/202607102000).
-- COMP shader substages and int/matrix images on GPU are not implemented
-  yet.
+- COMP substages execute as compute dispatches (storage-image outputs,
+  same-pixel inputs become samplers fetched at the invocation coord;
+  FRAG funcs may fuse INTO a COMP substage, never the reverse). By
+  measurement only `GatherDistGrad` defaults to COMP: for the hot
+  band-pass gathers, graphics<->compute switches plus lost elementwise
+  fusion cost more than the render passes they remove.
+- Rematerialization (RSP only): after substage packing, consumers clone
+  cheap same-pixel producer chains (whitelisted markers: `__face_fetch__`,
+  `__screen_coord__`) instead of reading them through attachments, then
+  undemanded outputs and dead substages are dropped. Invariant: a cloned
+  value must never also be an slt/tex input of the same substage (GLSL
+  name collision — guarded in `RematerializeSubStages`).
+- Int/matrix images on GPU are not implemented yet.
 - HardSoftRas depth peeling: `--peels=K` blends Eq.6 layers (K=3 matches
   the exact-backward reference); triangle enlargement is centroid scaling
   (`F::SoftClip` on the GPU; no geometry shader, no obtuse bbox split).
