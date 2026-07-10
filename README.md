@@ -20,20 +20,93 @@ al., CVPR 2024, [arXiv:2403.17496](https://arxiv.org/abs/2403.17496)); see
 
 ## Milestone 3: vertex-position gradients (HardSoftRas + screen-space AA)
 
-- `F::RasterizeSoft(...)`: HardSoftRas (Dressi Alg. 2, K=1) — hardware
-  rasterization of CPU-enlarged triangles; outputs the signed screen-space
-  distance to the original triangle (plus face id / hard depth / coverage)
-  with the paper's Eq. 3 depth shift, differentiable w.r.t. the clip-space
-  vertex positions through a per-vertex gradient gather.
-- `F::AntiAlias(img, tri_id, vtx_clip, faces)` + `F::RasterizeFaceId(...)`:
-  the Dr.Hair screen-space AA (Eq. 3-5) — blends across triangle-ID
-  boundaries by the pixel-to-silhouette-edge distance; differentiable
-  w.r.t. the image and the vertex positions (dense boundary gradients).
+- `F::RasterizeSoft(...)`: HardSoftRas (Dressi Alg. 2, `--peels=K` depth
+  peeling) — GPU-enlarged triangles supply a face-ID buffer with the
+  paper's Eq. 3 depth shift; the pixel-to-edge distance is built from
+  ordinary image-space ops over `F::LookupFaces` / `F::FaceFetch`'d corner
+  positions, so the backward is generated entirely by the AD. Gradients
+  cross the indexed reads with the paper's inverse-UV philosophy
+  (stochastic jittered edge samples, Alg. 1).
+- `F::AntiAlias(...)` + `F::RasterizeFaceId(...)`: the Dr.Hair screen-space
+  AA (Eq. 3-5) — blends across triangle-ID boundaries by the
+  pixel-to-silhouette-edge distance; differentiable w.r.t. the image and
+  the vertex positions (exact or stochastic backward via `--samples`).
   Works on general triangle meshes.
 - `examples/silhouette_optimization`: deforms an icosphere into the bunny
-  from multi-view silhouettes with either `--technique=hardsoftras` or
-  `--technique=aa` (CPU Adam + uniform-Laplacian and normal-consistency
-  regularizers; mask IoU ~0.98 for both techniques).
+  (or self-reconstructs a glTF mesh via `--mesh=`, e.g. the paper's
+  Avocado) from multi-view silhouettes. The whole iteration is
+  GPU-resident (the paper's transfer model): in-graph projections, soft
+  geometry, uniform-Laplacian / normal-consistency regularizers and Adam
+  with GPU-resident state (`DressiAD::addUpdate`); per-iteration CPU
+  traffic is zero. Mask IoU ~0.98 for both techniques.
+
+## Performance
+
+Measured on the paper's Table 4 mesh — the glTF sample **Avocado**
+(406 vertices / 682 faces) — with silhouette self-reconstruction: one
+full iteration = rasterization + backward to the 3D vertex positions +
+regularizers + Adam, one view. Hardware: RTX PRO 6000 (Blackwell);
+the paper used an RTX 2080 (roughly 10x less raw throughput).
+
+### vs the paper (Table 4, ms per iteration)
+
+| resolution | paper (RTX 2080) | ours HardSoftRas K=1 | ours K=3 | ours AA |
+|---|---|---|---|---|
+| 256²  | 0.304 | 0.20 | 0.39 | 0.49 |
+| 512²  | 0.442 | 0.28 | 0.65 | 0.52 |
+| 1024² | 1.034 | 0.58 | 1.38 | 0.54 |
+| 2048² | 3.301 | 1.54 | 4.49 | 0.60 |
+| 4096² | —     | ~5.5 | —    | 0.81 |
+
+The scaling shape matches the paper (fixed per-pass overhead dominates at
+low resolutions; pixel work takes over above 1024²). K=1 beats the
+paper's absolute numbers at every resolution; accounting for the GPU
+generation an effective ~3-5x remains, which maps onto the known
+unimplemented items (`{1,1}` values as real uniforms, zero-copy optimizer
+aliasing).
+
+### vs nvdiffrast (same GPU, same task; `scripts/nvdiffrast_bench.py`)
+
+The current nvdiffrast (0.4.0) has removed the OpenGL rasterizer
+(`RasterizeGLContext` delegates to CUDA), so the paper-era GL backend is
+measured on a pinned v0.2.6 (late 2021 — the version the paper compared
+against; the CUDA rasterizer only appeared in v0.3.0, 2022-03).
+
+| resolution | nvdiffrast GL v0.2.6 | nvdiffrast CUDA v0.4.0 | ours HSR K=1 | ours AA |
+|---|---|---|---|---|
+| 256²  | 1.78 | 1.11 | **0.20** | 0.49 |
+| 512²  | 1.76 | 1.18 | **0.28** | 0.52 |
+| 1024² | 1.82 | 1.21 | **0.58** | 0.54 |
+| 2048² | 1.70 | 1.28 | 1.54 | **0.60** |
+| 4096² | 3.47 | 3.28 | ~5.5 | **0.81** |
+
+### Discussion
+
+- **Why Dressi wins below 2048²:** every nvdiffrast version/backend
+  measures flat (~1.1-1.8 ms) here — at this mesh size a PyTorch
+  iteration is bound by host-side kernel launches, not GPU work. Dressi
+  bakes the whole forward + backward + optimizer into pre-recorded Vulkan
+  command buffers with zero per-iteration host involvement, so it runs at
+  the cost of the actual GPU work (0.2 ms).
+- **Why the paper's "gap grows with resolution" does not reproduce
+  as-is:** on the RTX 2080, nvdiffrast's 2048² iteration was
+  GPU-work-bound (5.4-8.0 ms in Table 4). On a Blackwell-class GPU the
+  same pixel work costs well under 1 ms and hides beneath the host-launch
+  floor until 4096². The advantage source is the same as in the paper —
+  it just saturates earlier on modern hardware.
+- **The AA technique is nearly resolution-independent** (0.49 → 0.81 ms
+  for a 256x pixel increase): its 8-neighbor forward early-outs on equal
+  triangle IDs, making the cost silhouette-perimeter-bound rather than
+  area-bound, and its stochastic vertex backward is O(faces). It beats
+  both nvdiffrast backends at every resolution, including 4x at 4096².
+- **Honest limitation:** in the pixel-bound regime (HardSoftRas at
+  4096²) nvdiffrast's hand-tuned CUDA kernels are leaner per pixel than
+  our generated full-screen RGBA32F passes (3.3-3.5 vs ~5.5 ms); reducing
+  the loss/AA chains' image traffic is the known lever there.
+- Quality on this benchmark: self-reconstruction reaches silhouette IoU
+  0.986 (HardSoftRas, K=3) / 0.977 (AA); the stochastic backwards trade
+  a little per-iteration accuracy for the O(faces) cost and recover it
+  with iterations and `--samples`/`--peels`, exactly as in the paper.
 
 ## Milestone 2: deferred rasterization + texture optimization
 
