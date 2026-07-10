@@ -116,6 +116,14 @@ TEST(Backward, PowExpLog) {
     CheckGrad(loss, {{x, bx}, {p, bp}}, p);
 }
 
+TEST(Backward, Sigmoid) {
+    Variable x(FLOAT, {1, 1});
+    Variable loss = F::Sigmoid(x * 2.f - 0.5f) + F::Sigmoid(x) * x;
+    CheckGrad(loss, {{x, MakeTensor(FLOAT, {1, 1},
+                                    [](size_t) { return 0.4f; })}},
+              x);
+}
+
 TEST(Backward, MinMaxClampMixAbs) {
     Variable a(FLOAT, {1, 1});
     Variable b(FLOAT, {1, 1});

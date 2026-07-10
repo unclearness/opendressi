@@ -559,6 +559,18 @@ Variable SmoothStep(const Variable& e0, const Variable& e1,
     return MakeOp(std::move(desc), {e0, e1, x});
 }
 
+Variable Sigmoid(const Variable& x) {
+    OpDesc desc;
+    desc.name = "Sigmoid";
+    desc.fwd_code = "{y}=1.0/(1.0+exp(-{x0}));";
+    desc.bwd = [](const Variables&, const Variable& y, const Variable& gy,
+                  uint32_t) -> Variable {
+        return Mul(gy, Mul(y, Sub(F::Float(1.f), y)));
+    };
+    desc.cpu = MapCpu1([](float v) { return 1.f / (1.f + std::exp(-v)); });
+    return MakeOp(std::move(desc), {x});
+}
+
 // -------------------------- Comparison (scalar, 0/1) --------------------------
 Variable Less(const Variable& x0, const Variable& x1) {
     return CompareOp("Less", "<", x0, x1,

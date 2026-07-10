@@ -47,6 +47,7 @@ Variable Clamp(const Variable& x, const Variable& lo, const Variable& hi);
 Variable Mix(const Variable& x0, const Variable& x1, const Variable& t);
 Variable Step(const Variable& edge, const Variable& x);
 Variable SmoothStep(const Variable& e0, const Variable& e1, const Variable& x);
+Variable Sigmoid(const Variable& x);
 
 // -------------------------- Comparison (scalar, 0/1) --------------------------
 Variable Less(const Variable& x0, const Variable& x1);
