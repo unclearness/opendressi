@@ -143,20 +143,21 @@ def rasterize(ctx: RasterizeVulkanContext, pos: torch.Tensor,
                    ref=md)
         eng.upload("ones3f", np.ones((1, md.n_faces * 3, 1), np.float32),
                    token=("static", id(md)), ref=md)
-        clip_vk = clip_gl_to_vk(pos_b)  # [N, V, 4], one vectorized remap
-        corner_uv = torch.from_numpy(np.tile(_CORNER_UV, (md.n_faces, 1)))
+        # Vectorized prep: one unweld gather / concat for the whole batch
+        clip3_all = clip_gl_to_vk(pos_b)[:, md.unweld]  # [N, 3F, 4]
+        corner_uv = torch.from_numpy(
+            np.tile(_CORNER_UV, (md.n_faces, 1))).expand(n, -1, -1)
+        attr4_all = torch.cat(
+            [corner_uv, pos_b[:, md.unweld][:, :, 2:4]], dim=2)
+        tok = upload_token(pos_b)
         for i in range(n):
-            clip3 = clip_vk[i][md.unweld]  # [3F, 4] per-corner positions
-            attr4 = torch.cat([corner_uv, pos_b[i][md.unweld][:, 2:4]],
-                              dim=1)
-            eng.upload(_item("clip3", i), vertex_array(clip3),
-                       token=("clip3", i, upload_token(pos_b)), ref=pos_b)
-            eng.upload(_item("attr4", i), vertex_array(attr4),
-                       token=("attr4", i, upload_token(pos_b)), ref=pos_b)
+            eng.upload(_item("clip3", i), vertex_array(clip3_all[i]),
+                       token=("clip3", i, tok), ref=pos_b)
+            eng.upload(_item("attr4", i), vertex_array(attr4_all[i]),
+                       token=("attr4", i, tok), ref=pos_b)
         eng.run()
-        outs = [torch.from_numpy(a) for a in eng.read_outputs()]
-
-    rast_cpu = _stack_batch(outs)
+        rast_cpu = torch.from_numpy(
+            eng.read_outputs_stacked()).reshape(n, h, w, 4)
     rast = _to_device(rast_cpu, in_device)
     attach(rast, RastInfo(pos=pos_b, tri=tri, resolution=(h, w),
                           extra={"ctx": ctx}))
@@ -242,11 +243,12 @@ class _InterpolateFn(torch.autograd.Function):
             _interpolate_uploads(eng, md, rinfo, rast_cpu, attr_b,
                                  shared_attr)
             eng.run()
-            outs = [torch.from_numpy(a) for a in eng.read_outputs()]
+            out = torch.from_numpy(
+                eng.read_outputs_stacked()).reshape(n, h, w, -1)
 
         fctx.dressi = (vctx, md, rinfo, n, shared_attr, c_attr, (h, w))
         fctx.save_for_backward(attr, rast)
-        return _stack_batch(outs)
+        return out
 
     @staticmethod
     def backward(fctx, grad_out):
@@ -270,9 +272,9 @@ class _InterpolateFn(torch.autograd.Function):
             if shared_attr:
                 g_attr = torch.from_numpy(eng.read_grad("attr"))[0]
             else:
-                arrs = eng.read_grads([_item("attr", i) for i in range(n)])
-                g_attr = torch.stack(
-                    [torch.from_numpy(a)[0] for a in arrs], dim=0)
+                g_attr = torch.from_numpy(eng.read_grads_stacked(
+                    [_item("attr", i) for i in range(n)])).reshape(
+                        n, md.n_verts, -1)
         return g_attr.to(attr.device), None, None, None, None, None
 
 
@@ -381,11 +383,12 @@ class _TextureFn(torch.autograd.Function):
             _texture_uploads(eng, tex_b, uv_cpu, md, rinfo, iinfo, False,
                              (h, w))
             eng.run()
-            outs = [torch.from_numpy(a) for a in eng.read_outputs()]
+            out = torch.from_numpy(
+                eng.read_outputs_stacked()).reshape(n, h, w, -1)
         fctx.dressi = (vctx, md, rinfo, iinfo, n, mesh_dims,
                        (h, w, th, tw, c_tex))
         fctx.save_for_backward(tex, uv)
-        return _stack_batch(outs)
+        return out
 
     @staticmethod
     def backward(fctx, grad_out):
@@ -505,11 +508,12 @@ class _AntiAliasFn(torch.autograd.Function):
         with vctx.lock:
             _antialias_uploads(eng, md, color_cpu, rast_cpu, pos_b, 0)
             eng.run()
-            outs = [torch.from_numpy(a) for a in eng.read_outputs()]
+            out = torch.from_numpy(
+                eng.read_outputs_stacked()).reshape(n, h, w, -1)
         fctx.dressi = (vctx, md, grad_mask, n, pos_gradient_boost,
                        n_samples, (h, w, c_img))
         fctx.save_for_backward(color, rast, pos)
-        return _stack_batch(outs)
+        return out
 
     @staticmethod
     def backward(fctx, grad_out):
@@ -535,18 +539,14 @@ class _AntiAliasFn(torch.autograd.Function):
                 eng.upload(Engine.seed_name(i), as_hwc(g[i]))
             eng.run()
             g_color = g_pos = None
-            names = ([_item("img", i) for i in range(n)] if grad_mask[0]
-                     else [])
-            if grad_mask[1]:
-                names += [_item("clip", i) for i in range(n)]
-            arrs = eng.read_grads(names)
             if grad_mask[0]:
-                g_color = torch.stack(
-                    [torch.from_numpy(a) for a in arrs[:n]], dim=0)
+                g_color = torch.from_numpy(eng.read_grads_stacked(
+                    [_item("img", i) for i in range(n)])).reshape(
+                        n, h, w, -1)
             if grad_mask[1]:
-                g_pos = torch.stack(
-                    [clip_grad_vk_to_gl(torch.from_numpy(a)[0])
-                     for a in arrs[-n:]], dim=0) * boost
+                g_clip = torch.from_numpy(eng.read_grads_stacked(
+                    [_item("clip", i) for i in range(n)])).reshape(n, -1, 4)
+                g_pos = clip_grad_vk_to_gl(g_clip) * boost
 
         out_gc = None
         if g_color is not None:
@@ -646,13 +646,11 @@ class _RasterizeSoftFn(torch.autograd.Function):
         with vctx.lock:
             _rasterize_soft_uploads(eng, md, pos_b)
             eng.run()
-            arrs = eng.read_outputs()
-            outs = [torch.stack(
-                [torch.from_numpy(arrs[i * peels + k])
-                 for k in range(peels)], dim=0) for i in range(n)]
+            out = torch.from_numpy(
+                eng.read_outputs_stacked()).reshape(n, peels, h, w, 4)
         fctx.dressi = (vctx, md, n, peels, radius_px, (h, w))
         fctx.save_for_backward(pos)
-        return _stack_batch(outs)  # [N, K, H, W, 4]
+        return out  # [N, K, H, W, 4]
 
     @staticmethod
     def backward(fctx, grad_out):
@@ -674,10 +672,9 @@ class _RasterizeSoftFn(torch.autograd.Function):
                     eng.upload(Engine.seed_name(i * peels + k),
                                as_hwc(g[i, k]))
             eng.run()
-            arrs = eng.read_grads([_item("clip", i) for i in range(n)])
-            g_pos = torch.stack(
-                [clip_grad_vk_to_gl(torch.from_numpy(a)[0]) for a in arrs],
-                dim=0)
+            g_clip = torch.from_numpy(eng.read_grads_stacked(
+                [_item("clip", i) for i in range(n)])).reshape(n, -1, 4)
+            g_pos = clip_grad_vk_to_gl(g_clip)
         if pos.dim() == 2:
             g_pos = g_pos.sum(dim=0)
         return g_pos.to(pos.device), None, None, None, None, None, None

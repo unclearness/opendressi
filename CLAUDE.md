@@ -57,7 +57,11 @@ inputs changed (reactive cache).
   `__gather_inv_uv__`, `__rasterize__`, `__upsample_nearest_2x__`,
   `__rasterize_soft__ r=<px>`, `__rasterize_face_id__`,
   `__gather_dist_grad__`, `__antialias__`, `__antialias_bwd_img__`,
-  `__antialias_bwd_vtx__`, `__sum_all__`, `__sum_partial__`).
+  `__antialias_bwd_vtx__`, `__col_sum__`, `__sum_all__`,
+  `__sum_partial__`). The per-vertex gather backwards (GatherDistGrad,
+  AntiAliasBwdVtx) default to WIDE (`wide=1` marker): {V,max_deg}
+  partials (one incident face per thread) + `__col_sum__` — a {V,1}
+  target runs only V threads and is brutally latency-bound.
 - `vk/` — headless context, executor (`ParseStagesAsVulkanObjects`
   equivalent), CPU↔GPU transfer with VEC3→RGBA32F padding (persistent
   staging; readback staging MUST be HostCached — memcpy from

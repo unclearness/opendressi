@@ -104,6 +104,10 @@ public:
     CpuImage recvImg(const Variable& var);
     // Batched download: all images share one staging buffer and one submit
     std::vector<CpuImage> recvImgs(const Variables& vars);
+    // Same, but all images must share one size/vtype; returns them stacked
+    // as a single {w, h * n} image (callers reshape to a batch) so the
+    // batch needs no per-item copies downstream
+    CpuImage recvImgsStacked(const Variables& vars);
 
 private:
     struct Impl;

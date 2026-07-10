@@ -306,6 +306,7 @@ bool dressi_aa_pair(sampler2D tri, sampler2D vclip, sampler2D faces,
                code == "__antialias__" ||
                code == "__antialias_bwd_img__" ||
                code.rfind("__antialias_bwd_vtx__", 0) == 0 ||
+               code == "__col_sum__" ||
                code.rfind("__soft_clip__", 0) == 0 ||
                code == "__vertex_neighbor_mean__" ||
                code == "__nc_face_term__" ||
@@ -1033,6 +1034,8 @@ bool dressi_aa_pair(sampler2D tri, sampler2D vclip, sampler2D faces,
             // the paper's inverse-table philosophy).
             const int aa_samples = std::stoi(node->fwd_code.substr(
                     node->fwd_code.find("n=") + 2));
+            const bool aa_wide =
+                    node->fwd_code.find("wide=1") != std::string::npos;
             const size_t gy_b = slt_binding.at(xs[0]);
             const size_t img_b = slt_binding.at(xs[1]);
             const size_t tri_b = slt_binding.at(xs[2]);
@@ -1097,15 +1100,24 @@ bool dressi_aa_pair(sampler2D tri, sampler2D vclip, sampler2D faces,
             } else {
                 // Stochastic: jittered samples along the incident faces'
                 // edges (per-face sample positions shared across vertices;
-                // flattened to a single loop to keep the shared tail)
+                // flattened to a single loop to keep the shared tail).
+                // Wide mode handles ONE incident face per fragment (row =
+                // face slot) so the thread count scales with max_deg.
                 const size_t sd_b = slt_binding.at(xs[6]);
                 body << "        uint seed = uint(texelFetch(u_slt" << sd_b
                      << ", ivec2(0, 0), 0).x + 0.5);\n";
-                body << "        for (int it = 0; it < "
-                     << (max_deg * uint32_t(aa_samples)) << "; it++) {\n";
-                body << "            int d = it / " << aa_samples << ";\n";
-                body << "            int smp = it - d * " << aa_samples
-                     << ";\n";
+                if (aa_wide) {
+                    body << "        int d = dressi_coord.y;\n";
+                    body << "        for (int smp = 0; smp < " << aa_samples
+                         << "; smp++) {\n";
+                } else {
+                    body << "        for (int it = 0; it < "
+                         << (max_deg * uint32_t(aa_samples)) << "; it++) {\n";
+                    body << "            int d = it / " << aa_samples
+                         << ";\n";
+                    body << "            int smp = it - d * " << aa_samples
+                         << ";\n";
+                }
                 body << "            float fv = texelFetch(u_slt" << vf_b
                      << ", ivec2(vid, d), 0).x;\n";
                 body << "            if (fv < -0.5) continue;\n";
@@ -1195,6 +1207,20 @@ bool dressi_aa_pair(sampler2D tri, sampler2D vclip, sampler2D faces,
             body << "    }\n";
             continue;
         }
+        if (node->fwd_code == "__col_sum__") {
+            // Per-column sum over the input's rows: {W,H} -> {W,1}
+            const size_t x_b = slt_binding.at(xs[0]);
+            const uint32_t rows = xs[0].getImgSize().h;
+            const uint32_t n = NumComponents(y.getVType());
+            const char* swz = SwizzleOf(n);
+            body << "    " << y_type << " " << y_name << " = " << y_type
+                 << "(0.0);\n";
+            body << "    for (int r = 0; r < " << rows << "; r++) {\n";
+            body << "        " << y_name << " += texelFetch(u_slt" << x_b
+                 << ", ivec2(dressi_coord.x, r), 0)" << swz << ";\n";
+            body << "    }\n";
+            continue;
+        }
         if (node->fwd_code.rfind("__gather_dist_grad__", 0) == 0) {
             // xs = {gy_screen, raster_out, vtx_clip_tex, faces_tex,
             // vtx_faces_tex}; output texel = hard vertex. Gathers
@@ -1207,6 +1233,8 @@ bool dressi_aa_pair(sampler2D tri, sampler2D vclip, sampler2D faces,
             // padded 1 px.
             const float radius_px = std::stof(node->fwd_code.substr(
                     std::strlen("__gather_dist_grad__ r=")));
+            const bool gd_wide =
+                    node->fwd_code.find("wide=1") != std::string::npos;
             const size_t gy_bind = slt_binding.at(xs[0]);
             const size_t ro_bind = slt_binding.at(xs[1]);
             const size_t cl_bind = slt_binding.at(xs[2]);
@@ -1221,14 +1249,26 @@ bool dressi_aa_pair(sampler2D tri, sampler2D vclip, sampler2D faces,
             body << "        int vid = dressi_coord.x;\n";
             body << "        vec4 vc = texelFetch(u_slt" << cl_bind
                  << ", ivec2(vid, 0), 0);\n";
-            // Per-vertex scan bbox over the soft triangles of incident faces
+            // Per-vertex scan bbox over the soft triangles of incident
+            // faces; wide mode handles ONE incident face per fragment
+            // (row = adjacency slot) with an exact face-id pixel guard
             body << "        vec2 bbmin = vec2(1e30);"
                     " vec2 bbmax = vec2(-1e30);\n";
-            body << "        for (int d = 0; d < " << max_deg
-                 << "; d++) {\n";
+            if (gd_wide) {
+                body << "        int gface = -1;\n";
+                body << "        { int d = dressi_coord.y; {\n";
+            } else {
+                body << "        for (int d = 0; d < " << max_deg
+                     << "; d++) {\n";
+            }
             body << "            float fv = texelFetch(u_slt" << vf_bind
                  << ", ivec2(vid, d), 0).x;\n";
-            body << "            if (fv < -0.5) continue;\n";
+            if (gd_wide) {
+                body << "            if (fv >= -0.5) {\n";
+                body << "            gface = int(fv + 0.5);\n";
+            } else {
+                body << "            if (fv < -0.5) continue;\n";
+            }
             body << "            ivec3 bvi = ivec3(texelFetch(u_slt"
                  << fc_bind << ", ivec2(int(fv + 0.5), 0), 0).xyz + 0.5);\n";
             body << "            vec2 bs[3]; bool bok = true;\n";
@@ -1240,7 +1280,11 @@ bool dressi_aa_pair(sampler2D tri, sampler2D vclip, sampler2D faces,
             body << "                bs[k] = (c.xy / c.w * 0.5 + 0.5) * "
                  << wh << ";\n";
             body << "            }\n";
-            body << "            if (!bok) continue;\n";
+            if (gd_wide) {
+                body << "            if (bok) {\n";
+            } else {
+                body << "            if (!bok) continue;\n";
+            }
             body << "            vec2 ce = (bs[0] + bs[1] + bs[2]) / 3.0;\n";
             body << "            float dmin = 1e30;\n";
             body << "            for (int k = 0; k < 3; k++) {\n";
@@ -1260,7 +1304,11 @@ bool dressi_aa_pair(sampler2D tri, sampler2D vclip, sampler2D faces,
             body << "                bbmin = min(bbmin, sv);"
                     " bbmax = max(bbmax, sv);\n";
             body << "            }\n";
-            body << "        }\n";
+            if (gd_wide) {
+                body << "            } } } }\n";  // bok / fv / d scopes
+            } else {
+                body << "        }\n";
+            }
             body << "        int px0 = clamp(int(floor(bbmin.x - 1.5)), 0, "
                  << (scr.w - 1) << ");\n";
             body << "        int py0 = clamp(int(floor(bbmin.y - 1.5)), 0, "
@@ -1276,6 +1324,12 @@ bool dressi_aa_pair(sampler2D tri, sampler2D vclip, sampler2D faces,
             body << "            vec4 ro = texelFetch(u_slt" << ro_bind
                  << ", sp, 0);\n";
             body << "            if (ro.w < 0.5) continue;\n";
+            if (gd_wide) {
+                // Exact split: the pixel belongs to exactly one face, so
+                // only the (vid, d)-slot holding that face accumulates it
+                body << "            if (int(ro.y + 0.5) != gface)"
+                        " continue;\n";
+            }
             body << "            float g = texelFetch(u_slt" << gy_bind
                  << ", sp, 0).x;\n";
             body << "            if (g == 0.0) continue;\n";

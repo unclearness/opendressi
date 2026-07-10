@@ -222,6 +222,37 @@ fences, numpy conversions) — the decisive fix is Vulkan-export -> CUDA
 -import interop. `_C.set_log_level("debug")` now exposes the per-stage
 GPU timestamp breakdown from Python (how the BwdVtx wall was found).
 
+## Addendum 3: wide per-vertex gathers + stacked downloads (2026-07-11)
+
+The GPU timestamp breakdown identified the actual walls after Addendum 2:
+`AntiAliasBwdVtx` 2.83 ms and `GatherDistGrad` **14.4 ms** GPU for the
+8-view batch — both are {V,1}-target gathers, i.e. only V (=642)
+fragment/compute threads with the whole batch AND all incident faces
+serialized inside each thread.
+
+- **Wide layout** (default for both): output {V, max_deg} — thread (v, d)
+  handles ONE incident face — reduced by a new `ColSum` op
+  (`__col_sum__`, {W,H}→{W,1}). For GatherDistGrad the wide thread scans
+  only ITS face's soft bbox with an exact `face_id == f` pixel guard
+  (pixels belong to exactly one face → the split cannot double count),
+  which also shrinks the scan area vs the union bbox. Measured:
+  AA 2826 → 435 us; hsr example 58.8 → 23.8 ms/iter; the native fused
+  Avocado bench 0.57 → **0.218 ms/iter** (the same stage dominated it).
+  CPU kernels mirror the row attribution for exact GPU/CPU parity.
+- **Stacked batched downloads**: `recvImgsStacked` strips same-shape
+  images into ONE contiguous {w, h*n} buffer (one submit, no per-item
+  allocations, no torch.stack copy); rasterize prep vectorized (one
+  batched unweld gather + concat).
+- Silhouette example (8 views, 128², CUDA): aa 15.7 → **10.7 ms/iter**
+  (from 39 at the start of the perf work; IoU 0.971-0.973 preserved),
+  hardsoftras 97 → 23.8. Avocado eager 2.3/3.4/8.5 @256/512/1024².
+  nvdiffrast aa: 6.2 — remaining gap is ~6 ms host glue (CUDA<->CPU
+  staging + submit fences); the decisive next step stays Vulkan-export ->
+  CUDA-import interop.
+- Rejected this round: in-graph unweld via SoftClip(radius=0) — passes
+  all unit tests but reproducibly degrades AA convergence (IoU
+  0.97 -> 0.94, cause not isolated); rasterize keeps the CPU-side unweld.
+
 ## Addendum: Python examples + uv packaging (same session)
 
 - `pyproject.toml` (uv-managed, `package = false`): CUDA torch from the

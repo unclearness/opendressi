@@ -552,19 +552,35 @@ CpuImage DressiAD::recvImg(const Variable& var) {
     return ReceiveImageFromDevice(*im.ctx, it->second, var.getVType());
 }
 
-std::vector<CpuImage> DressiAD::recvImgs(const Variables& vars) {
-    Impl& im = *m_impl;
-    DRESSI_CHECK(im.plan_valid, "recvImgs before the first execStep()");
+namespace {
+
+std::vector<std::pair<vkw::ImagePackPtr, VType>> CollectRecvItems(
+        const GpuPlan& plan, const Variables& vars) {
     std::vector<std::pair<vkw::ImagePackPtr, VType>> items;
     items.reserve(vars.size());
     for (const auto& var : vars) {
         DRESSI_CHECK(var, "recvImgs: null Variable");
-        auto it = im.plan.imgs.find(var);
-        DRESSI_CHECK(it != im.plan.imgs.end(),
+        auto it = plan.imgs.find(var);
+        DRESSI_CHECK(it != plan.imgs.end(),
                      "recvImgs: the Variable has no GPU image");
         items.emplace_back(it->second, var.getVType());
     }
-    return ReceiveImagesFromDevice(*im.ctx, items);
+    return items;
+}
+
+}  // namespace
+
+std::vector<CpuImage> DressiAD::recvImgs(const Variables& vars) {
+    Impl& im = *m_impl;
+    DRESSI_CHECK(im.plan_valid, "recvImgs before the first execStep()");
+    return ReceiveImagesFromDevice(*im.ctx,
+                                   CollectRecvItems(im.plan, vars));
+}
+
+CpuImage DressiAD::recvImgsStacked(const Variables& vars) {
+    Impl& im = *m_impl;
+    DRESSI_CHECK(im.plan_valid, "recvImgs before the first execStep()");
+    return ReceiveImagesStacked(*im.ctx, CollectRecvItems(im.plan, vars));
 }
 
 }  // namespace dressi

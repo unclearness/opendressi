@@ -292,4 +292,64 @@ std::vector<CpuImage> ReceiveImagesFromDevice(
     return out;
 }
 
+CpuImage ReceiveImagesStacked(
+        const VkContext& ctx,
+        const std::vector<std::pair<vkw::ImagePackPtr, VType>>& items) {
+    DRESSI_CHECK(!items.empty(), "recvImgsStacked: empty batch");
+    const auto& [img0, vtype] = items[0];
+    const uint32_t w = img0->view_size.width;
+    const uint32_t h = img0->view_size.height;
+    const uint32_t n_logical = NumComponents(vtype);
+    const uint32_t n_phys = PhysChannels(vtype);
+    const size_t n_pixels = size_t(w) * h;
+    const size_t item_bytes = n_pixels * n_phys * sizeof(float);
+    const size_t stride = (item_bytes + 15) & ~size_t(15);
+    for (const auto& [img, vt] : items) {
+        DRESSI_CHECK(vt == vtype && img->view_size.width == w &&
+                             img->view_size.height == h,
+                     "recvImgsStacked: images must share one shape");
+    }
+
+    const auto& staging =
+            EnsureStaging(ctx, ctx.recv_staging, stride * items.size(),
+                          vk::BufferUsageFlagBits::eTransferDst,
+                          /*cached=*/true);
+    RunOneShot(ctx, [&](const vk::UniqueCommandBuffer& cmd) {
+        constexpr auto kSrc = vk::ImageLayout::eTransferSrcOptimal;
+        constexpr auto kRead = vk::ImageLayout::eShaderReadOnlyOptimal;
+        for (size_t i = 0; i < items.size(); i++) {
+            const auto& img = items[i].first;
+            vkw::SetImageLayout(cmd, img, kRead, kSrc);
+            const vk::BufferImageCopy region(
+                    stride * i, w, h,
+                    vk::ImageSubresourceLayers(
+                            vk::ImageAspectFlagBits::eColor, 0, 0, 1),
+                    vk::Offset3D(0, 0, 0), vk::Extent3D(w, h, 1));
+            cmd->copyImageToBuffer(img->img_res_pack->img.get(), kSrc,
+                                   staging->buf.get(), region);
+            vkw::SetImageLayout(cmd, img, kSrc, kRead);
+        }
+    });
+
+    const auto* base = static_cast<const uint8_t*>(ctx.device->mapMemory(
+            staging->dev_mem_pack->dev_mem.get(), 0,
+            staging->dev_mem_pack->dev_mem_size));
+    CpuImage out(w, h * uint32_t(items.size()), n_logical);
+    for (size_t i = 0; i < items.size(); i++) {
+        const float* src = reinterpret_cast<const float*>(base + stride * i);
+        float* dst = &out.data[i * n_pixels * n_logical];
+        if (n_logical == n_phys) {
+            std::memcpy(dst, src, item_bytes);
+        } else {
+            for (size_t p = 0; p < n_pixels; p++) {
+                for (uint32_t c = 0; c < n_logical; c++) {
+                    dst[p * n_logical + c] = src[p * n_phys + c];
+                }
+            }
+        }
+    }
+    ctx.device->unmapMemory(staging->dev_mem_pack->dev_mem.get());
+    return out;
+}
+
 }  // namespace dressi

@@ -166,22 +166,28 @@ for the uploaded `grad_output`).
 
 Same Avocado silhouette benchmark (ms/iter; fixed view, Adam on positions):
 
-| resolution | dressi.torch (eager) | dressi native fused (Python) | C++ example (AA) | nvdiffrast CUDA | DRTK |
-|---|---|---|---|---|---|
-| 256²  | 2.8 | **0.55** | 0.49 | 1.11 | 2.12 |
-| 512²  | 3.6 | **0.57** | 0.49 | 1.18 | 6.15 |
-| 1024² | 9.0 | **0.55** | 0.51 | 1.21 | 19.6 |
+| resolution | dressi.torch (eager) | dressi native fused (Python) | nvdiffrast CUDA | DRTK |
+|---|---|---|---|---|
+| 256²  | 2.3 | **0.21** | 1.11 | 2.12 |
+| 512²  | 3.4 | **0.22** | 1.18 | 6.15 |
+| 1024² | 8.5 | **0.22** | 1.21 | 19.6 |
 
 The eager layer batches aggressively: N-item calls unroll into ONE engine
 (one execStep per forward and one per backward for a whole minibatch),
-uploads/downloads ride single staging submits (`sendImgs`/`recvImgs`),
-forward runs a gradient-free engine (backward stages never execute in
-forward), and CPU copies of device tensors are cached across op
-boundaries. Multi-view silhouette example (8 views, 128², 300 iters,
-CUDA tensors): 39 → **15.7 ms/iter** (nvdiffrast: 6.2). The remaining gap
-is measured, not mysterious: the AntiAlias vertex-gradient stage runs at
-{V,1} = one thread per vertex with the batch serialized inside each
-thread (2.9 ms GPU), and ~6 ms of host glue (CUDA↔CPU staging copies +
+uploads/downloads ride single staging submits (`sendImgs`/`recvImgs`,
+same-shape batches land in one stacked buffer), forward runs a
+gradient-free engine (backward stages never execute in forward), and CPU
+copies of device tensors are cached across op boundaries. The engine-side
+win that helps every path (including the C++ examples): the per-vertex
+gather backwards (`AntiAliasBwdVtx`, `GatherDistGrad`) now run WIDE —
+{V, max_deg} partials (one incident face per thread) reduced by a
+per-column sum — instead of one thread per vertex scanning all incident
+faces; measured 2.9 → 0.44 ms (AA) and 14.4 → sub-ms (HardSoftRas) on an
+8-view batch.
+
+Multi-view silhouette example (8 views, 128², 300 iters, CUDA tensors):
+aa 39 → **10.7 ms/iter**, hardsoftras 97 → **23.8** (nvdiffrast aa: 6.2).
+The remaining eager gap is ~6 ms of host glue (CUDA↔CPU staging copies +
 submit fences) that only GPU interop can remove.
 
 - The eager drop-in path pays per-op CPU round trips (v1 transfers via CPU

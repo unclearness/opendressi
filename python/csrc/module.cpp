@@ -179,6 +179,16 @@ NB_MODULE(_C, m) {
                 }
                 return ToNdArray(std::move(img));
             })
+            .def("recv_imgs_stacked",
+                 [](DressiAD& self, const Variables& vars) {
+                     CpuImage img;
+                     {
+                         nb::gil_scoped_release rel;
+                         img = self.recvImgsStacked(vars);
+                     }
+                     // (n*h, w, c); the torch layer reshapes to the batch
+                     return ToNdArray(std::move(img));
+                 })
             .def("recv_imgs", [](DressiAD& self, const Variables& vars) {
                 std::vector<CpuImage> imgs;
                 {

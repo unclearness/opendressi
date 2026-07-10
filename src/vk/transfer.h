@@ -44,6 +44,12 @@ std::vector<CpuImage> ReceiveImagesFromDevice(
         const VkContext& ctx,
         const std::vector<std::pair<vkw::ImagePackPtr, VType>>& items);
 
+// Same-shape variant: strips every image into one contiguous {w, h*n}
+// buffer (no per-item allocations; callers view it as a batch)
+CpuImage ReceiveImagesStacked(
+        const VkContext& ctx,
+        const std::vector<std::pair<vkw::ImagePackPtr, VType>>& items);
+
 // Fills a host-visible vertex/index buffer from CPU data. Int VTypes
 // (face indices) are converted from the CpuImage's float storage to uint32.
 void SendGeometryToBuffer(const VkContext& ctx,

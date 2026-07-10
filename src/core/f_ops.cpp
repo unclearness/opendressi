@@ -1179,10 +1179,44 @@ namespace {
 // hard vertex, sums gy.x * d dist / d clip over all covered pixels of faces
 // containing it (argmin edge + envelope theorem; screen->clip Jacobian with
 // the 1/w terms, z gradient is exactly zero).
+// Per-column (over rows) sum: {W,H} -> {W,1}. Reduces the wide
+// per-vertex-gather partials (GatherDistGrad / AntiAliasBwdVtx);
+// trivially parallel over W.
+Variable ColSum(const Variable& x) {
+    OpDesc desc;
+    desc.name = "ColSum";
+    desc.fwd_code = "__col_sum__";
+    desc.input_access = {InputAccess::TexelFetch};
+    desc.infer = [](const Variables& xs) -> std::pair<VType, ImgSize> {
+        return {xs[0].getVType(), {xs[0].getImgSize().w, 1}};
+    };
+    desc.bwd = NullBwd;
+    desc.cpu = [](const std::vector<CpuTensor>& xs) {
+        const CpuTensor& x_t = xs[0];
+        const uint32_t n = x_t.numComp();
+        const uint32_t w = x_t.size.w;
+        CpuTensor out;
+        out.vtype = x_t.vtype;
+        out.size = {w, 1};
+        out.data.assign(size_t(w) * n, 0.f);
+        for (uint32_t r = 0; r < x_t.size.h; r++) {
+            for (uint32_t xw = 0; xw < w; xw++) {
+                for (uint32_t c = 0; c < n; c++) {
+                    out.data[size_t(xw) * n + c] +=
+                            x_t.data[(size_t(r) * w + xw) * n + c];
+                }
+            }
+        }
+        return out;
+    };
+    return MakeOp(std::move(desc), {x});
+}
+
 Variable GatherDistGrad(const Variable& gy_screen, const Variable& raster_out,
                         const Variable& vtx_clip_tex,
                         const Variable& faces_tex,
-                        const Variable& vtx_faces_tex, float radius_px) {
+                        const Variable& vtx_faces_tex, float radius_px,
+                        bool wide) {
     OpDesc desc;
     desc.name = "GatherDistGrad";
     // COMP keeps the compute-substage path exercised by the exact-backward
@@ -1192,25 +1226,48 @@ Variable GatherDistGrad(const Variable& gy_screen, const Variable& raster_out,
     desc.shader_type = COMP;
     // Special-cased by the shader codegen; the enlargement radius rides on
     // the marker so the shader can bound each vertex's pixel scan by the
-    // exact soft-triangle bbox of its incident faces (from vtx_faces_tex)
-    desc.fwd_code = "__gather_dist_grad__ r=" + FloatLiteral(radius_px);
+    // exact soft-triangle bbox of its incident faces (from vtx_faces_tex).
+    // `wide` spreads the incident faces over rows ({V,1} -> {V,max_deg}
+    // partials + ColSum): each thread scans ONE face's soft bbox with an
+    // exact face-id guard (pixels belong to exactly one face, so the
+    // split cannot double count) -- a {V,1} target runs only V threads
+    // with the whole union bbox per thread and was measured at 14.4 ms
+    // for an 8-item batch that the wide layout collapses.
+    desc.fwd_code = "__gather_dist_grad__ r=" + FloatLiteral(radius_px) +
+                    (wide ? " wide=1" : "");
     desc.input_access = {InputAccess::TexelFetch, InputAccess::TexelFetch,
                          InputAccess::TexelFetch, InputAccess::TexelFetch,
                          InputAccess::TexelFetch};
-    desc.infer = [](const Variables& xs) -> std::pair<VType, ImgSize> {
+    desc.infer = [wide](const Variables& xs) -> std::pair<VType, ImgSize> {
+        if (wide) {
+            return {VEC4, {xs[2].getImgSize().w, xs[4].getImgSize().h}};
+        }
         return {VEC4, xs[2].getImgSize()};
     };
     desc.bwd = NullBwd;
-    desc.cpu = [](const std::vector<CpuTensor>& xs) {
+    desc.cpu = [wide](const std::vector<CpuTensor>& xs) {
         const CpuTensor& gy = xs[0];
         const CpuTensor& ro = xs[1];
         const CpuTensor& clip = xs[2];
         const CpuTensor& faces = xs[3];
+        const CpuTensor& vft = xs[4];
         const ImgSize screen = ro.size;
+        const uint32_t n_verts = clip.size.w;
         CpuTensor out;
         out.vtype = VEC4;
-        out.size = clip.size;
-        out.data.assign(size_t(clip.size.w) * 4, 0.f);
+        out.size = wide ? ImgSize{n_verts, vft.size.h} : clip.size;
+        out.data.assign(size_t(out.size.w) * out.size.h * 4, 0.f);
+        // wide: contribution of face f to vertex u lands in u's adjacency
+        // row that holds f (matches the GPU thread (u, d))
+        const auto row_of = [&](uint32_t u, uint32_t f) -> uint32_t {
+            for (uint32_t d = 0; d < vft.size.h; d++) {
+                const float fv = vft.data[size_t(d) * n_verts + u];
+                if (fv >= -0.5f && uint32_t(int64_t(fv + 0.5f)) == f) {
+                    return d;
+                }
+            }
+            return 0;
+        };
         const float w_scr = float(screen.w);
         const float h_scr = float(screen.h);
         for (uint32_t y = 0; y < screen.h; y++) {
@@ -1250,7 +1307,9 @@ Variable GatherDistGrad(const Variable& gy_screen, const Variable& raster_out,
                         continue;
                     }
                     const float* c = &clip.data[size_t(idx[k]) * 4];
-                    float* dst = &out.data[size_t(idx[k]) * 4];
+                    const size_t row = wide ? row_of(idx[k], f) : 0;
+                    float* dst =
+                            &out.data[(row * n_verts + idx[k]) * 4];
                     dst[0] += gsx * 0.5f * w_scr / c[3];
                     dst[1] += gsy * 0.5f * h_scr / c[3];
                     dst[3] += -(gsx * 0.5f * w_scr * c[0] +
@@ -1319,7 +1378,8 @@ Variable RasterizeSoft(const Variable& vtx_clip_soft, const Variable& face_id,
         if (bwd_idx != 3) {
             return nullptr;
         }
-        return GatherDistGrad(gy, y, xs[3], xs[4], xs[5], radius_px);
+        return ColSum(GatherDistGrad(gy, y, xs[3], xs[4], xs[5],
+                                     radius_px, /*wide=*/true));
     };
     return MakeOp(std::move(desc),
                   {vtx_clip_soft, face_id, faces_soft, vtx_clip_hard_tex,
@@ -1363,7 +1423,8 @@ Variable RasterizeSoft(const Variable& vtx_clip_soft, const Variable& face_id,
         if (bwd_idx != 3) {
             return nullptr;
         }
-        return GatherDistGrad(gy, y, xs[3], xs[4], xs[5], radius_px);
+        return ColSum(GatherDistGrad(gy, y, xs[3], xs[4], xs[5],
+                                     radius_px, /*wide=*/true));
     };
     return MakeOp(std::move(desc),
                   {vtx_clip_soft, face_id, faces_soft, vtx_clip_hard_tex,
@@ -2191,23 +2252,32 @@ Variable AntiAliasBwdVtx(const Variable& gy, const Variable& img,
                          const Variable& tri_id, const Variable& vtx_clip,
                          const Variable& faces,
                          const Variable& vtx_faces_tex, const Variable& seed,
-                         uint32_t n_samples) {
+                         uint32_t n_samples, bool wide) {
+    DRESSI_CHECK(!wide || n_samples > 0,
+                 "AntiAliasBwdVtx: wide requires stochastic samples");
     OpDesc desc;
     desc.name = "AntiAliasBwdVtx";
     // n=0: exact scan of the incident faces' pixel bboxes; n>0: the
     // paper-pattern stochastic backward (n jittered samples along each
-    // incident face's edges per iteration)
-    desc.fwd_code =
-            "__antialias_bwd_vtx__ n=" + std::to_string(n_samples);
+    // incident face's edges per iteration). `wide` spreads the incident
+    // faces over rows ({V,1} -> {V,max_deg} partials + ColSum): a {V,1}
+    // target runs only V fragment threads and was measured latency-bound
+    // (2.9 ms at V=642 x 8 batch items); the wide layout multiplies the
+    // thread count by max_deg.
+    desc.fwd_code = "__antialias_bwd_vtx__ n=" + std::to_string(n_samples) +
+                    (wide ? " wide=1" : "");
     desc.input_access = {InputAccess::TexelFetch, InputAccess::TexelFetch,
                          InputAccess::TexelFetch, InputAccess::TexelFetch,
                          InputAccess::TexelFetch, InputAccess::TexelFetch,
                          InputAccess::TexelFetch};
-    desc.infer = [](const Variables& xs) -> std::pair<VType, ImgSize> {
+    desc.infer = [wide](const Variables& xs) -> std::pair<VType, ImgSize> {
+        if (wide) {
+            return {VEC4, {xs[3].getImgSize().w, xs[5].getImgSize().h}};
+        }
         return {VEC4, xs[3].getImgSize()};
     };
     desc.bwd = NullBwd;
-    desc.cpu = [n_samples](const std::vector<CpuTensor>& xs) {
+    desc.cpu = [n_samples, wide](const std::vector<CpuTensor>& xs) {
         const CpuTensor& gy = xs[0];
         const CpuTensor& img = xs[1];
         const CpuTensor& tri = xs[2];
@@ -2219,12 +2289,14 @@ Variable AntiAliasBwdVtx(const Variable& gy, const Variable& img,
         const float h_scr = float(screen.h);
         CpuTensor out;
         out.vtype = VEC4;
-        out.size = clip.size;
-        out.data.assign(size_t(clip.size.w) * 4, 0.f);
-        // Accumulates one active pair's contribution for vertex `v` only
+        out.size = wide ? ImgSize{clip.size.w, xs[5].size.h} : clip.size;
+        out.data.assign(size_t(out.size.w) * out.size.h * 4, 0.f);
+        // Accumulates one active pair's contribution: into `dst_v` (the
+        // (v, d) partial row) when vertex-filtered, else scattered to the
+        // endpoint vertices' own rows (exact mode)
         const auto accumulate = [&](uint32_t v, int x, int y, int nx,
-                                    int ny, const AaPair& pr,
-                                    bool only_v) {
+                                    int ny, const AaPair& pr, bool only_v,
+                                    float* dst_v) {
             const size_t so = (size_t(y) * screen.w + x) * n;
             const size_t no = (size_t(ny) * screen.w + nx) * n;
             float gr = 0.f;
@@ -2257,7 +2329,8 @@ Variable AntiAliasBwdVtx(const Variable& gy, const Variable& img,
                 const float gqx = gr * dqs[e][0];
                 const float gqy = gr * dqs[e][1];
                 const float* c = &clip.data[size_t(ids[e]) * 4];
-                float* dst = &out.data[size_t(ids[e]) * 4];
+                float* dst = only_v ? dst_v
+                                    : &out.data[size_t(ids[e]) * 4];
                 dst[0] += gqx * 0.5f * w_scr / c[3];
                 dst[1] += gqy * 0.5f * h_scr / c[3];
                 dst[3] += -(gqx * 0.5f * w_scr * c[0] +
@@ -2282,7 +2355,7 @@ Variable AntiAliasBwdVtx(const Variable& gy, const Variable& img,
                             pr.r >= 1.f) {
                             continue;
                         }
-                        accumulate(0, x, y, nx, ny, pr, false);
+                        accumulate(0, x, y, nx, ny, pr, false, nullptr);
                     }
                 }
             }
@@ -2296,6 +2369,9 @@ Variable AntiAliasBwdVtx(const Variable& gy, const Variable& img,
         const uint32_t max_deg = vf.size.h;
         for (uint32_t v = 0; v < n_verts; v++) {
             for (uint32_t d = 0; d < max_deg; d++) {
+                float* dst_v = wide
+                        ? &out.data[(size_t(d) * n_verts + v) * 4]
+                        : &out.data[size_t(v) * 4];
                 const float fv = vf.data[size_t(d) * n_verts + v];
                 if (fv < -0.5f) {
                     continue;
@@ -2355,7 +2431,7 @@ Variable AntiAliasBwdVtx(const Variable& gy, const Variable& img,
                         if (pr.ia != v && pr.ib != v) {
                             continue;
                         }
-                        accumulate(v, x, y, nx, ny, pr, true);
+                        accumulate(v, x, y, nx, ny, pr, true, dst_v);
                     }
                 }
             }
@@ -2408,8 +2484,15 @@ Variable AntiAlias(const Variable& img, const Variable& tri_id,
             return AntiAliasBwdImg(gy, xs[1], xs[2], xs[3]);
         }
         if (bwd_idx == 2) {
+            if (n_samples > 0) {
+                // Wide layout: {V, max_deg} partials + per-column sum --
+                // max_deg x the fragment threads of the {V,1} gather
+                return ColSum(AntiAliasBwdVtx(gy, xs[0], xs[1], xs[2],
+                                              xs[3], xs[4], xs[5],
+                                              n_samples, /*wide=*/true));
+            }
             return AntiAliasBwdVtx(gy, xs[0], xs[1], xs[2], xs[3], xs[4],
-                                   xs[5], n_samples);
+                                   xs[5], n_samples, /*wide=*/false);
         }
         return nullptr;  // tri_id / faces / adjacency / seed: no gradient
     };

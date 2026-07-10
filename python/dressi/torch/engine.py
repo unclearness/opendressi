@@ -118,12 +118,21 @@ class Engine:
         """All outputs in one staging submit."""
         return self.ad.recv_imgs(self.outputs)
 
+    def read_outputs_stacked(self) -> np.ndarray:
+        """All (same-shape) outputs as one (n*h, w, c) array: one staging
+        submit AND one contiguous buffer (no per-item copies downstream)."""
+        return self.ad.recv_imgs_stacked(self.outputs)
+
     def read_grad(self, name: str) -> np.ndarray:
         return self.ad.recv_img(self._grad_var(name))
 
     def read_grads(self, names: list[str]) -> list[np.ndarray]:
         """Named gradients in one staging submit."""
         return self.ad.recv_imgs([self._grad_var(n) for n in names])
+
+    def read_grads_stacked(self, names: list[str]) -> np.ndarray:
+        """Same-shape named gradients as one (n*h, w, c) array."""
+        return self.ad.recv_imgs_stacked([self._grad_var(n) for n in names])
 
     # ------------------------------ internal -------------------------------
     def _grad_var(self, name: str):
