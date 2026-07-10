@@ -11,10 +11,12 @@ follow PyTorch's derivatives when unclear.
 ```sh
 cmake --preset msvc                  # VS 2022, x64; sets VULKAN_SDK env
 cmake --build --preset release
-ctest --preset release               # all 74 tests
+ctest --preset release               # all 92 tests
 ctest --preset release -LE gpu       # CPU-only (no Vulkan device needed)
 ./build/tests/Release/dressi_tests_cpu.exe --gtest_filter=Backward.*
 ./build/examples/Release/texture_optimization.exe data/bunny
+./build/examples/Release/silhouette_optimization.exe data/bunny --technique=hardsoftras
+./build/examples/Release/silhouette_optimization.exe data/bunny --technique=aa
 ```
 
 - Vulkan SDK is auto-located under `C:/VulkanSDK/*` (`cmake/FindVulkanSdk.cmake`);
@@ -39,7 +41,9 @@ inputs changed (reactive cache).
   back-edges; creation id doubles as topological order), type/size inference
   with `{1,1}` uniform broadcasting, `f_ops.cpp` (every op = GLSL snippet +
   backward generator + CPU kernel), `build_backward.cpp`, `cpu_eval.cpp`
-  (CPU interpreter = the test oracle).
+  (CPU interpreter = the test oracle), `cpu_raster.cpp` (CPU reference
+  rasterizer + the signed-distance / AA-pair kernels shared by GLSL
+  mirrors and cpu_funcs).
 - `pack/` — SubStage/Stage IR, `trivial_packer` (1 func = 1 pass, the
   correctness baseline; `DressiAD::setPackingMode`), `greedy_packer` (RSP:
   back-to-front greedy fusion under Vulkan limits), `reactive.cpp` (prunes
@@ -47,7 +51,10 @@ inputs changed (reactive cache).
 - `codegen/` — substage → GLSL fragment shader (`{y}`/`{x0}`/`{s0}` snippet
   markers, substage-local `v0..vN` names for golden tests and shader-cache
   hits); special-cased ops by marker string (`__reduce_2x2_sum__`,
-  `__gather_inv_uv__`, `__rasterize__`, `__upsample_nearest_2x__`).
+  `__gather_inv_uv__`, `__rasterize__`, `__upsample_nearest_2x__`,
+  `__rasterize_soft__ r=<px>`, `__rasterize_face_id__`,
+  `__gather_dist_grad__`, `__antialias__`, `__antialias_bwd_img__`,
+  `__antialias_bwd_vtx__`).
 - `vk/` — headless context, executor (`ParseStagesAsVulkanObjects`
   equivalent), CPU↔GPU transfer with VEC3→RGBA32F padding.
 
@@ -69,7 +76,16 @@ inputs changed (reactive cache).
   reactive-cache runs (see commit 36d7a6e for the failure mode).
 - Geometry (`F::Rasterize` inputs) must be leaf variables; the executor
   uploads them into vertex/index buffers (`CpuImage` stores face indices as
-  floats; converted to uint32 at upload).
+  floats; converted to uint32 at upload). A leaf used both as geometry and
+  as a texelFetch image (the AA pattern) gets both resources; one `sendImg`
+  updates both.
+- Vertex-position gradients (`F::RasterizeSoft` = HardSoftRas,
+  `F::AntiAlias` = Dr.Hair screen-space AA) land on clip-position `{V,1}`
+  leaves; the optimizer lambda can capture its `gxs`, `markOutput` them and
+  the example loop reads them back for CPU-side Adam + projection chain
+  rule (see `examples/silhouette_optimization`, `tests/grad_capture.h`).
+  Their screen->vertex backward ops are per-vertex gathers over all pixels
+  (O(V*W*H); no atomics/COMP needed).
 - Optimizer outputs are copied back into their input images at end of frame
   (no aliasing; a render pass must not read an image it writes).
 - Loss must be scalar FLOAT `{1,1}` (`F::Mean` guarantees this).
@@ -81,8 +97,17 @@ inputs changed (reactive cache).
   UBOs; uniforms-as-UBO is not implemented yet.
 - COMP shader substages, int/matrix images on GPU, and zero-copy optimizer
   aliasing are not implemented yet.
-- Not yet from the paper: HardSoftRas (geometry gradients), depth peeling
-  execution, texture backward w.r.t. UV.
+- HardSoftRas is implemented with K=1 only (no depth-peeling execution, so
+  Eq.6 multi-layer silhouette blending is a single sigmoid); triangle
+  enlargement is CPU-side centroid scaling (no geometry shader, no obtuse
+  bbox split) and vertex updates run CPU-side (in-graph vertex-buffer
+  copy-back / in-graph MVP not implemented).
+- The AA technique picks the boundary edge by owner preference
+  {tri(neighbor), tri(self)} instead of an exact closest-depth test, and
+  its forward keeps the scheme's inherent residual discontinuity when a
+  pixel-center coverage flips (gradients, not forward continuity, are the
+  deliverable).
+- Not yet from the paper: texture backward w.r.t. UV.
 
 ## Work logs
 
