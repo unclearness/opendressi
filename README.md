@@ -100,6 +100,13 @@ for (int i = 0; i < 300; i++) {
 CpuImage optimized = ad.recvImg(param);
 ```
 
+## License
+
+MIT (see [LICENSE](LICENSE)). Third-party dependencies keep their own
+licenses: [VulkanWrapper](https://github.com/unclearness/VulkanWrapper)
+(MIT), glad (generated loader), GLFW (zlib), tinyobjloader (MIT), stb
+(public domain / MIT), spdlog (MIT), GoogleTest (BSD-3).
+
 ## Layout
 
 ```
