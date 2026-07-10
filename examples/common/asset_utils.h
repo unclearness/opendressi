@@ -28,6 +28,10 @@ dressi::CpuImage LoadImageRgb(const std::string& path);
 // Saves a 1- or 3-channel float image (clamped to [0,1]) as PNG
 void SaveImagePng(const std::string& path, const dressi::CpuImage& img);
 
+// Tiles same-sized 3-channel images into a grid (row-major, `cols` per row)
+dressi::CpuImage TileImages(const std::vector<dressi::CpuImage>& imgs,
+                            uint32_t cols);
+
 // Column-major 4x4 matrices (GLSL convention: m[col*4+row])
 using Mat4 = std::array<float, 16>;
 Mat4 Mul(const Mat4& a, const Mat4& b);

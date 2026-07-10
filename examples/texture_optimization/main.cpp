@@ -147,17 +147,25 @@ int main(int argc, char* argv[]) try {
         ad.sendImg(jitter, j);
     };
 
-    // Live view (glad + GLFW); its cost is excluded from optimization timing
-    VkViewer viewer(512, 512, "dressi texture optimization");
-    bool viewer_open = viewer.valid();
+    // Live view (glad + GLFW): all views tiled at fixed viewpoints, GT
+    // targets in one window and the current renders in another. Display
+    // cost is excluded from optimization timing.
+    const uint32_t tile_cols = 3;
+    const uint32_t tile_rows = (n_views + tile_cols - 1) / tile_cols;
+    const uint32_t win_w = 256 * tile_cols;
+    const uint32_t win_h = 256 * tile_rows;
+    VkViewer viewer_target(win_w, win_h, "targets (GT, fixed views)");
+    VkViewer viewer_pred(win_w, win_h, "optimized render");
+    bool viewer_open = viewer_target.valid() && viewer_pred.valid();
     if (!viewer_open) {
         spdlog::warn("live viewer unavailable; continuing headless");
     }
-    const int view_interval = 5;
+    const int view_interval = 10;
+    CpuImage target_tile;
 
     using Clock = std::chrono::steady_clock;
     double opt_ms = 0.0;   // execStep only
-    double view_ms = 0.0;  // recvImg + window update
+    double view_ms = 0.0;  // recvImg + tiling + window updates
     for (int iter = 0; iter < n_iters; iter++) {
         const auto t0 = Clock::now();
         send_jitter(iter);
@@ -166,22 +174,27 @@ int main(int argc, char* argv[]) try {
         opt_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
 
         if (iter == 0) {
+            std::vector<CpuImage> targets;
             for (uint32_t v = 0; v < n_views; v++) {
+                targets.push_back(ad.recvImg(views[v].target));
                 SaveImagePng(fmt::format("{}/target_view{}.png", out_dir, v),
-                             ad.recvImg(views[v].target));
+                             targets.back());
             }
+            target_tile = TileImages(targets, tile_cols);
             SaveImagePng(out_dir + "/render_first_view0.png",
                          ad.recvImg(views[0].pred));
         }
 
         if (viewer_open && iter % view_interval == 0) {
             const auto tv0 = Clock::now();
-            const uint32_t v =
-                    uint32_t(iter / view_interval) % n_views;
-            viewer.setTitle(fmt::format(
-                    "dressi texture optimization  iter {}  view {}", iter,
-                    v));
-            viewer_open = viewer.update(ad.recvImg(views[v].pred));
+            std::vector<CpuImage> preds;
+            for (uint32_t v = 0; v < n_views; v++) {
+                preds.push_back(ad.recvImg(views[v].pred));
+            }
+            viewer_pred.setTitle(
+                    fmt::format("optimized render  iter {}", iter));
+            viewer_open = viewer_pred.update(TileImages(preds, tile_cols)) &&
+                          viewer_target.update(target_tile);
             view_ms += std::chrono::duration<double, std::milli>(
                                Clock::now() - tv0)
                                .count();

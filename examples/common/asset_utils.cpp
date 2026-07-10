@@ -132,6 +132,28 @@ void SaveImagePng(const std::string& path, const CpuImage& img) {
     }
 }
 
+CpuImage TileImages(const std::vector<CpuImage>& imgs, uint32_t cols) {
+    if (imgs.empty()) {
+        return CpuImage();
+    }
+    const uint32_t w = imgs[0].width;
+    const uint32_t h = imgs[0].height;
+    const uint32_t rows = (uint32_t(imgs.size()) + cols - 1) / cols;
+    CpuImage tile(w * cols, h * rows, 3);
+    for (size_t i = 0; i < imgs.size(); i++) {
+        const uint32_t ox = uint32_t(i % cols) * w;
+        const uint32_t oy = uint32_t(i / cols) * h;
+        for (uint32_t y = 0; y < h; y++) {
+            for (uint32_t x = 0; x < w; x++) {
+                for (uint32_t c = 0; c < 3; c++) {
+                    tile.at(ox + x, oy + y, c) = imgs[i].at(x, y, c);
+                }
+            }
+        }
+    }
+    return tile;
+}
+
 Mat4 Mul(const Mat4& a, const Mat4& b) {
     Mat4 r{};
     for (int col = 0; col < 4; col++) {
