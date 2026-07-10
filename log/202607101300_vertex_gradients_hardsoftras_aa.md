@@ -312,3 +312,23 @@ the FaceFetch pattern to the AA technique, K>1 depth peeling.
 Summary vs paper (256^2, 1 view, full iteration): paper RTX 2080
 0.304-0.364 ms; ours RTX PRO 6000 0.22 ms (K=1) / 0.40 ms (K=3).
 Same architecture, same knobs (r, K, iterations, samples).
+
+## Resolution scaling vs paper Table 4 (1 view, full iteration, ms; ours =
+## sphere 642v/1280f on RTX PRO 6000, paper = Avocado 406v/682f on RTX 2080)
+
+| resolution | paper | ours K=1 | ours K=3 | ours AA (stoch) |
+|---|---|---|---|---|
+| 256^2  | 0.304 | 0.21 | 0.41 | 0.52 |
+| 512^2  | 0.442 | 0.27 | 0.68 | 0.53 |
+| 1024^2 | 1.034 | 0.54 | 1.56 | 0.54 |
+| 2048^2 | 3.301 | 1.54 | 4.67 | 0.60 |
+
+Same sublinear shape as the paper (fixed per-pass overhead dominates at
+low resolutions, pixel work takes over above 1024^2). K=1 beats the
+paper's absolute numbers at every resolution; accounting for the ~10x
+raw-GPU gap an effective ~3-5x remains (pass-count overhead: regularizer
+RMS reduction chains, {1,1} texelFetch uniforms, per-pass fixed cost) --
+the remaining known deviations (uif_vars uniforms, zero-copy optimizer
+aliasing, COMP reductions) map exactly onto it. The AA technique is
+nearly resolution-independent thanks to the same-ID early-out in its
+8-neighbor forward.
