@@ -34,7 +34,14 @@ SubStages TrivialPackSubStages(const Functions& all_funcs) {
                 continue;
             }
             if (type == RASTER) {
-                ss.vtx_vars.push_back(x);  // ordered: pos, attrib, faces
+                if (!access.empty() && access[i] == InputAccess::TexelFetch) {
+                    if (std::find(ss.slt_vars.begin(), ss.slt_vars.end(),
+                                  x) == ss.slt_vars.end()) {
+                        ss.slt_vars.push_back(x);  // raster FS texelFetch
+                    }
+                } else {
+                    ss.vtx_vars.push_back(x);  // ordered: pos, attrib, faces
+                }
             } else if (!access.empty() &&
                        access[i] == InputAccess::Sampled) {
                 if (std::find(ss.tex_vars.begin(), ss.tex_vars.end(), x) ==

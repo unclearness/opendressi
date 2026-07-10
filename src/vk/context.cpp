@@ -8,9 +8,13 @@ VkContextPtr CreateVkContext(bool debug_enable) {
                                         /*surface_enable=*/false);
     ctx->physical_device = vkw::GetFirstPhysicalDevice(ctx->instance);
     ctx->queue_family_idx = vkw::GetQueueFamilyIdx(ctx->physical_device);
+    // Enable the physical device's feature set (gl_PrimitiveID in fragment
+    // shaders needs the Geometry capability from the geometryShader feature)
     ctx->device = vkw::CreateDevice(ctx->queue_family_idx,
                                     ctx->physical_device, 1,
-                                    /*swapchain_support=*/false);
+                                    /*swapchain_support=*/false,
+                                    vkw::GetPhysicalFeatures2(
+                                            ctx->physical_device));
     ctx->queue = vkw::GetQueue(ctx->device, ctx->queue_family_idx);
     ctx->limits = vkw::GetPhysicalProperties(ctx->physical_device)->limits;
     ctx->glsl_compiler = std::make_unique<vkw::GLSLCompiler>();

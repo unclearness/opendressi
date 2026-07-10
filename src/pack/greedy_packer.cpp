@@ -72,7 +72,11 @@ bool PushFrontFuncIntoSubStage(const Function& func, SubStage& ss,
             continue;
         }
         if (func.getShaderType() == RASTER) {
-            ss.vtx_vars.push_back(x);  // ordered: pos, attrib, faces
+            if (AccessOf(func, i) == InputAccess::TexelFetch) {
+                PushUnique(ss.slt_vars, x);  // raster FS texelFetch input
+            } else {
+                ss.vtx_vars.push_back(x);  // ordered: pos, attrib, faces
+            }
         } else if (AccessOf(func, i) == InputAccess::TexelFetch) {
             PushUnique(ss.slt_vars, x);
         } else if (AccessOf(func, i) == InputAccess::Sampled) {

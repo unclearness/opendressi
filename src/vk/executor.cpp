@@ -151,6 +151,27 @@ GpuPlan BuildGpuPlan(const VkContext& ctx, const Stages& stages,
         auto frag_module = ctx.glsl_compiler->compileFromString(
                 ctx.device, shaders.frag, vk::ShaderStageFlagBits::eFragment);
 
+        // texelFetch inputs of the raster fragment shader (slt binding
+        // order shared with the codegen)
+        vkw::DescSetPackPtr desc_set;
+        if (!ss.slt_vars.empty()) {
+            std::vector<vkw::DescSetInfo> binding_infos(
+                    ss.slt_vars.size(),
+                    {vk::DescriptorType::eCombinedImageSampler, 1,
+                     vk::ShaderStageFlagBits::eFragment});
+            desc_set = vkw::CreateDescriptorSetPack(ctx.device, binding_infos);
+            auto write_pack = vkw::CreateWriteDescSetPack();
+            for (size_t i = 0; i < ss.slt_vars.size(); i++) {
+                ensure_texture(ss.slt_vars[i]);
+                vkw::AddWriteDescSet(
+                        write_pack, desc_set, uint32_t(i),
+                        {plan.textures.at(ss.slt_vars[i])},
+                        {vk::ImageLayout::eShaderReadOnlyOptimal});
+            }
+            vkw::UpdateDescriptorSets(ctx.device, write_pack);
+            plan.desc_sets.push_back(desc_set);
+        }
+
         const uint32_t attr_comps = NumComponents(attr_var.getVType());
         const vk::Format attr_fmt =
                 attr_comps == 1 ? vk::Format::eR32Sfloat
@@ -163,13 +184,17 @@ GpuPlan BuildGpuPlan(const VkContext& ctx, const Stages& stages,
         pipeline_info.depth_write_enable = true;
         pipeline_info.depth_comp_op = vk::CompareOp::eLessOrEqual;
         pipeline_info.color_blend_infos.resize(1);
+        std::vector<vkw::DescSetPackPtr> desc_packs;
+        if (desc_set) {
+            desc_packs.push_back(desc_set);
+        }
         auto pipeline = vkw::CreateGraphicsPipeline(
                 ctx.device, {vert_module, frag_module},
                 {{0, 16, vk::VertexInputRate::eVertex},
                  {1, attr_comps * 4, vk::VertexInputRate::eVertex}},
                 {{0, 0, vk::Format::eR32G32B32A32Sfloat, 0},
                  {1, 1, attr_fmt, 0}},
-                pipeline_info, {}, rp, 0);
+                pipeline_info, desc_packs, rp, 0);
         plan.pipelines.push_back(pipeline);
 
         const std::vector<vk::ClearValue> clear_vals = {
@@ -178,6 +203,9 @@ GpuPlan BuildGpuPlan(const VkContext& ctx, const Stages& stages,
                 vk::ClearValue(vk::ClearDepthStencilValue(1.f, 0))};
         vkw::CmdBeginRenderPass(cmd, rp, fb, clear_vals);
         vkw::CmdBindPipeline(cmd, pipeline);
+        if (desc_set) {
+            vkw::CmdBindDescSets(cmd, pipeline, {desc_set});
+        }
         const vk::Extent2D extent = {stage.img_size.w, stage.img_size.h};
         vkw::CmdSetViewport(cmd, extent);
         vkw::CmdSetScissor(cmd, extent);
