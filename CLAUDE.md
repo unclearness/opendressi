@@ -32,6 +32,34 @@ ctest --preset release -LE gpu       # CPU-only (no Vulkan device needed)
   GPU timestamp breakdown every 100 frames; `DRESSI_VK_DEBUG=1` enables
   the Vulkan validation layers.
 
+## Benchmarking (how README / perf numbers are produced)
+
+Every performance figure in the README is a **median steady-state
+`execStep` wall time** measured this way — reproduce it exactly, do NOT
+report a raw mean-over-all-iters:
+
+- **Exclude a warmup.** The first `execStep` runs the full build (pack +
+  GLSL compile + Vulkan objects, ~250 ms) and the reactive cache does a
+  fast rebuild at iter 2 and a full rebuild at iter 8. Skip ≥20 iters
+  before timing. Averaging these in is the classic trap — it made the
+  silhouette example report 1.1 ms/iter at 300 iters vs 0.26 ms steady
+  (the build amortized over few iters), which once looked like "Python
+  beats C++". The example now excludes a 20-iter warmup and prints the
+  MEDIAN of the rest.
+- **Median, not mean.** At ≤512² the wall is dominated by host submit/
+  fence latency (GPU work is ~90 µs while wall is ~0.3 ms), so the mean
+  is pulled up by occasional OS-scheduling outliers. Median is the stable
+  metric and is what the tables use. Use `SPDLOG_LEVEL=debug`'s per-stage
+  GPU-timestamp total to separate GPU work from host overhead.
+- **When you improve the Python (`dressi.torch`) speed, ALWAYS also
+  re-measure the C++ path** (`silhouette_optimization` /
+  `scripts/dressi_native_bench.py`) for the same workload — several
+  optimizations live in the shared engine/transfer layer and move both,
+  and a Python-only number is not interpretable without the C++ baseline.
+  The native-fused Python bench and the C++ example run the *same* graph
+  and must land within noise of each other (~0.22 vs ~0.26 ms @512²
+  Avocado); a gap means a measurement bug, not a real difference.
+
 ## Architecture (src/)
 
 Pipeline per `DressiAD::execStep()` (the paper's InitStatus ladder):

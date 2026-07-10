@@ -26,6 +26,7 @@
 #include <spdlog/cfg/env.h>
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -544,16 +545,25 @@ int main(int argc, char* argv[]) try {
     };
 
     using Clock = std::chrono::steady_clock;
-    double opt_ms = 0.0;
+    std::vector<double> opt_samples;  // per-iter execStep ms (steady state)
     double view_ms = 0.0;
     float first_loss = 0.f;
     float last_loss = 0.f;
+    // Benchmark methodology (see CLAUDE.md "Benchmarking"): report the
+    // MEDIAN steady-state execStep, excluding a warmup that covers the
+    // one-time full build + the reactive fast/full rebuilds (~250 ms).
+    // Median (not mean) is robust to the host-side scheduling jitter that
+    // dominates when GPU work is only ~100 us; it is how the README /
+    // paper-comparison figures are produced.
+    const int opt_warmup = std::min(20, opt.n_iters / 2);
     for (int iter = 0; iter < opt.n_iters; iter++) {
         const auto t0 = Clock::now();
         ad.execStep();
-        opt_ms += std::chrono::duration<double, std::milli>(Clock::now() -
-                                                            t0)
-                          .count();
+        if (iter >= opt_warmup) {
+            opt_samples.push_back(std::chrono::duration<double, std::milli>(
+                                          Clock::now() - t0)
+                                          .count());
+        }
 
         if (iter == 0) {
             first_loss = loss_value();
@@ -585,9 +595,16 @@ int main(int argc, char* argv[]) try {
                                .count();
         }
         if (iter % 20 == 0 || iter == opt.n_iters - 1) {
-            spdlog::info("iter {:4d}  loss {:.8f}  opt {:.1f} ms/iter"
-                         "  (view {:.1f} ms/iter excluded)",
-                         iter, loss_value(), opt_ms / double(iter + 1),
+            double med = 0.0;
+            if (!opt_samples.empty()) {
+                std::vector<double> s = opt_samples;
+                std::sort(s.begin(), s.end());
+                med = s[s.size() / 2];
+            }
+            spdlog::info("iter {:4d}  loss {:.8f}  opt {:.3f} ms/iter"
+                         "  (median steady-state, {} warmup iters excluded;"
+                         " view {:.1f} ms/iter excluded)",
+                         iter, loss_value(), med, opt_warmup,
                          view_ms / double(iter + 1));
         }
     }

@@ -50,17 +50,24 @@ the paper used an RTX 2080 (roughly 10x less raw throughput).
 
 ### vs the paper (Table 4, ms per iteration)
 
+Median steady-state `execStep`, one-view Avocado (see the "Benchmarking"
+note below for methodology). `ours AA` improved markedly this round
+(0.49 → 0.24 ms) from the wide per-vertex gather backward.
+
 | resolution | paper (RTX 2080) | ours HardSoftRas K=1 | ours K=3 | ours AA |
 |---|---|---|---|---|
-| 256²  | 0.304 | 0.15 | 0.24 | 0.49 |
-| 512²  | 0.442 | 0.18 | 0.35 | 0.49 |
-| 1024² | 1.034 | 0.30 | 0.77 | 0.51 |
-| 2048² | 3.301 | 0.83 | 2.42 | 0.57 |
-| 4096² | —     | 2.87 | —    | 0.78 |
+| 256²  | 0.304 | 0.34 | 0.77 | 0.24 |
+| 512²  | 0.442 | 0.38 | 0.88 | 0.24 |
+| 1024² | 1.034 | 0.50 | 1.30 | 0.25 |
+| 2048² | 3.301 | 1.02 | 2.95 | 0.31 |
+| 4096² | —     | 3.08 | 9.64 | 0.51 |
 
 The scaling shape matches the paper (fixed per-pass overhead dominates at
-low resolutions; pixel work takes over above 1024²). K=1 beats the
-paper's absolute numbers at every resolution. The paper's remaining
+low resolutions; pixel work takes over above 1024²). At ≤512² the wall
+time is bound by host-side submit/fence latency, not GPU work (GPU
+timestamps total ~90 µs for HSR at 256² while the wall is ~0.34 ms), so
+these low-res figures track the machine's host overhead rather than the
+renderer. The paper's remaining
 machinery is implemented: `{1,1}` leaf values ride in real uniforms
 (uif_vars), the optimizer writes updated values directly into the input
 images (zero-copy aliasing via input+color attachments in eGeneral with
@@ -164,9 +171,13 @@ External gradients enter through a surrogate loss `output * grad_seed`
 (BuildBackward seeds 1 everywhere, so leaf gradients equal the exact VJP
 for the uploaded `grad_output`).
 
-Same Avocado silhouette benchmark (ms/iter; fixed view, Adam on positions):
+Same Avocado silhouette benchmark (median steady-state ms/iter; fixed
+view, Adam on positions). The **native fused** column drives the *same*
+Dressi graph as the C++ `silhouette_optimization` example and lands within
+noise of it (C++ 0.26 ms @512²) — Python is not magically faster; both
+run the compiled graph with zero per-iteration PCIe traffic:
 
-| resolution | dressi.torch (eager) | dressi native fused (Python) | nvdiffrast CUDA | DRTK |
+| resolution | dressi.torch (eager) | dressi native fused (Python ≈ C++) | nvdiffrast CUDA | DRTK |
 |---|---|---|---|---|
 | 256²  | 2.3 | **0.21** | 1.11 | 2.12 |
 | 512²  | 3.4 | **0.22** | 1.18 | 6.15 |
