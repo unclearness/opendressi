@@ -191,3 +191,23 @@ RTX PRO 6000 (~10x faster raw) = ~8.4 ms at 256^2 / ~2.5 ms at 128^2
 (HSR, 642 verts, K=1), AA ~97 ms at 256^2. M2 texture optimization
 (~0.5 ms/iter, 256^2 x 6 views) is in the paper's ballpark after GPU
 correction; the gap is specific to the gather backwards.
+
+## Follow-up: per-vertex bbox culling of the gather backwards (`5fc260c`)
+
+The gather ops' pixel loops are now bounded by each vertex's incident-face
+screen bbox, found by an O(F) face scan per vertex thread (cheap next to
+the former O(W*H) pixel scan). `__gather_dist_grad__` reconstructs the
+exact soft-triangle bbox in-shader (identical centroid-scaling formula and
+clamps as `BuildSoftGeometry`; the radius now rides on its marker too);
+`__antialias_bwd_vtx__` pads the hard bbox by the 8-neighborhood reach.
+Both are strict supersets of the contributing pixels: default runs
+reproduce bit-exactly and the GPU/CPU parity tests pass unchanged.
+
+fwd+bwd GPU per iteration (1 view): hardsoftras 256^2 8.4 -> 4.0 ms,
+aa 256^2 97 -> 8.1 ms (12x). Default example (8 views, 128^2): aa 220 ->
+43 ms/iter; hardsoftras stays ~28 ms/iter, now dominated by the CPU-side
+loop (per-view BuildSoftGeometry + leaf re-sends + grad readbacks).
+Remaining gap to the paper's 0.30 ms (RTX 2080, 256^2): still only V
+fragment threads of parallelism plus the O(V*F) face scan -- next levers
+are a precomputed vertex->face adjacency texture, tiled partial sums, or
+an atomic pixel-parallel scatter, and moving the vertex update in-graph.
