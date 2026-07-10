@@ -492,10 +492,17 @@ bool dressi_aa_pair(sampler2D tri, sampler2D vclip, sampler2D faces,
             body << "            hard_z = l0 * z[0] + l1 * z[1]"
                     " + (1.0 - l0 - l1) * z[2];\n";
             body << "        }\n";
-            body << "        gl_FragDepth = dist >= 0.0"
+            body << "        float dsh = dist >= 0.0"
                     " ? 0.5 * clamp(hard_z, 0.0, 1.0)"
                     " : 0.5 + 0.5 * clamp(-dist / "
                  << FloatLit(radius_px) << ", 0.0, 1.0);\n";
+            if (node->fwd_code.find("peel=1") != std::string::npos) {
+                // Depth peeling: only fragments behind the previous layer
+                const size_t pv_bind = slt_binding.at(xs[6]);
+                body << "        if (dsh <= texelFetch(u_slt" << pv_bind
+                     << ", dressi_coord, 0).x + 1e-4) discard;\n";
+            }
+            body << "        gl_FragDepth = dsh;\n";
             body << "        " << y_name
                  << " = vec4(dist, v_attr, hard_z, 1.0);\n";
             body << "    }\n";

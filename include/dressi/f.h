@@ -129,6 +129,18 @@ Variable RasterizeSoft(const Variable& vtx_clip_soft, const Variable& face_id,
                        const Variable& vtx_faces_tex, ImgSize screen_size,
                        float radius_px);
 
+// Depth-peeling variant (Alg.2, peel k > 0): fragments whose Eq.3-shifted
+// depth is <= `prev_shifted_depth` (+1e-4) are discarded, exposing the
+// next layer. Reconstruct the previous layer's shifted depth from its
+// output channels with elementwise ops (see the silhouette example).
+Variable RasterizeSoft(const Variable& vtx_clip_soft, const Variable& face_id,
+                       const Variable& faces_soft,
+                       const Variable& vtx_clip_hard_tex,
+                       const Variable& faces_tex,
+                       const Variable& vtx_faces_tex,
+                       const Variable& prev_shifted_depth,
+                       ImgSize screen_size, float radius_px);
+
 // Rasterizes the triangle-ID buffer: float(face_index) + 1 per covered
 // pixel (depth-tested), 0 for background. `vtx_attrib_dummy` is rasterized
 // vertex-format-wise but ignored (keeps the {pos, attrib, faces} executor

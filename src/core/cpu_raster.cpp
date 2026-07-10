@@ -243,7 +243,8 @@ CpuTensor RasterizeSoftCpu(const CpuTensor& soft_clip,
                            const CpuTensor& faces_soft,
                            const CpuTensor& hard_clip,
                            const CpuTensor& faces_tex, ImgSize screen,
-                           float radius_px) {
+                           float radius_px,
+                           const CpuTensor* prev_shifted_depth) {
     CpuTensor out;
     out.vtype = VEC4;
     out.size = screen;
@@ -331,6 +332,12 @@ CpuTensor RasterizeSoftCpu(const CpuTensor& soft_clip,
                                 ? 0.5f * std::min(std::max(hard_z, 0.f), 1.f)
                                 : 0.5f + 0.5f * std::min(-td.dist / radius_px,
                                                          1.f);
+                if (prev_shifted_depth &&
+                    depth <= prev_shifted_depth
+                                             ->data[size_t(y) * screen.w + x] +
+                                     1e-4f) {
+                    continue;  // depth peeling: behind the previous layer
+                }
                 float& zb = zbuf[size_t(y) * screen.w + x];
                 if (depth > zb) {
                     continue;

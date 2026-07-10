@@ -1253,6 +1253,50 @@ Variable RasterizeSoft(const Variable& vtx_clip_soft, const Variable& face_id,
                    faces_tex, vtx_faces_tex});
 }
 
+Variable RasterizeSoft(const Variable& vtx_clip_soft, const Variable& face_id,
+                       const Variable& faces_soft,
+                       const Variable& vtx_clip_hard_tex,
+                       const Variable& faces_tex,
+                       const Variable& vtx_faces_tex,
+                       const Variable& prev_shifted_depth,
+                       ImgSize screen_size, float radius_px) {
+    // Depth-peeling variant (Alg.2's outer K loop): fragments whose Eq.3
+    // shifted depth is <= the previous layer's are discarded. Recreate the
+    // previous layer's shifted depth from its output channels:
+    //   shift = coverage * mix(0.5 + 0.5*clamp(-dist/r), 0.5*clamp(z),
+    //                          step(0, dist))
+    DRESSI_CHECK(prev_shifted_depth.getVType() == FLOAT &&
+                         prev_shifted_depth.getImgSize() == screen_size,
+                 "RasterizeSoft: prev_shifted_depth must be FLOAT {S,S}");
+    // Same checks as the base overload run inside it; replicate the parts
+    // the shared builder needs
+    OpDesc desc;
+    desc.name = "RasterizeSoftPeel";
+    desc.fwd_code =
+            "__rasterize_soft__ r=" + FloatLiteral(radius_px) + " peel=1";
+    desc.shader_type = RASTER;
+    desc.input_access = {InputAccess::SamePixel,  InputAccess::SamePixel,
+                         InputAccess::SamePixel,  InputAccess::TexelFetch,
+                         InputAccess::TexelFetch, InputAccess::TexelFetch,
+                         InputAccess::TexelFetch};
+    desc.infer = [screen_size](const Variables&)
+            -> std::pair<VType, ImgSize> { return {VEC4, screen_size}; };
+    desc.cpu = [screen_size, radius_px](const std::vector<CpuTensor>& xs) {
+        return RasterizeSoftCpu(xs[0], xs[1], xs[2], xs[3], xs[4],
+                                screen_size, radius_px, &xs[6]);
+    };
+    desc.bwd = [radius_px](const Variables& xs, const Variable& y,
+                           const Variable& gy, uint32_t bwd_idx) -> Variable {
+        if (bwd_idx != 3) {
+            return nullptr;
+        }
+        return GatherDistGrad(gy, y, xs[3], xs[4], xs[5], radius_px);
+    };
+    return MakeOp(std::move(desc),
+                  {vtx_clip_soft, face_id, faces_soft, vtx_clip_hard_tex,
+                   faces_tex, vtx_faces_tex, prev_shifted_depth});
+}
+
 // ---------------- Indexed access (the paper's HardSoftRas core) --------------
 
 namespace {

@@ -48,7 +48,8 @@ struct Options {
     int n_iters = 300;
     uint32_t sphere_level = 3;
     float radius_px = 3.f;
-    uint32_t samples = 8;  // FaceFetch backward samples per face
+    uint32_t samples = 8;  // stochastic backward samples per face
+    uint32_t peels = 1;    // hardsoftras depth-peeling layers (K)
     float lr = 0.01f;
     // Regularizer weights relative to the data-gradient RMS; negative =
     // per-technique default (hardsoftras: 0.15/0.4 -- its sigmoid-band
@@ -80,6 +81,8 @@ Options ParseArgs(int argc, char* argv[]) {
             opt.sphere_level = uint32_t(std::stoul(value));
         } else if (key == "--samples") {
             opt.samples = uint32_t(std::stoul(value));
+        } else if (key == "--peels") {
+            opt.peels = std::max(1u, uint32_t(std::stoul(value)));
         } else if (key == "--lr") {
             opt.lr = std::stof(value);
         } else if (key == "--laplacian") {
@@ -222,14 +225,6 @@ int main(int argc, char* argv[]) try {
             // stochastic gather (Alg.1 philosophy).
             Variable soft_clip =
                     F::SoftClip(clip_v, s_faces_f, screen, opt.radius_px);
-            Variable rs = F::StopGradient(F::RasterizeSoft(
-                    soft_clip, s_face_id, s_faces_soft, clip_v, s_faces_f,
-                    s_vtx_faces, screen, opt.radius_px));
-            // Face-ID buffer: face+1 where covered (Shift depth applied
-            // by the rasterizer), 0 at background
-            Variable idx = (F::GetY(rs) + 1.f) * F::GetW(rs);
-            Variable mask = F::Greater(idx, F::Float(0.5f));
-
             // Per-face corner clip positions (differentiable, exact bwd)
             Variable tri0 =
                     F::LookupFaces(clip_v, s_faces_f, s_vtx_faces, 0);
@@ -237,63 +232,101 @@ int main(int argc, char* argv[]) try {
                     F::LookupFaces(clip_v, s_faces_f, s_vtx_faces, 1);
             Variable tri2 =
                     F::LookupFaces(clip_v, s_faces_f, s_vtx_faces, 2);
-            // Per-pixel corners of the covering face (stochastic bwd);
-            // adam_t doubles as the per-iteration jitter seed
-            const auto fetch = [&](const Variable& tri) {
-                return F::FaceFetch(tri, idx, tri0, tri1, tri2, adam_t,
-                                    opt.radius_px, opt.samples);
-            };
-            Variable c0 = fetch(tri0);
-            Variable c1 = fetch(tri1);
-            Variable c2 = fetch(tri2);
-            // Screen-space corners (background w guarded to 1)
-            const auto screen_of = [&](const Variable& c) {
-                Variable w = F::GetW(c) + (1.f - mask);
-                Variable sx = (F::GetX(c) / w * 0.5f + 0.5f) *
-                              float(screen.w);
-                Variable sy = (F::GetY(c) / w * 0.5f + 0.5f) *
-                              float(screen.h);
-                return F::Vec2(sx, sy);
-            };
-            Variable s0 = screen_of(c0);
-            Variable s1 = screen_of(c1);
-            Variable s2 = screen_of(c2);
-            // SignedDist() as elementwise image ops (AD differentiates)
             Variable pc = F::ScreenCoord(screen);
-            const auto edge_dist = [&](const Variable& a,
-                                       const Variable& b) {
-                Variable e = b - a;
-                Variable t = F::Clamp(F::Dot(pc - a, e) /
-                                              (F::Dot(e, e) + 1e-12f),
-                                      F::Float(0.f), F::Float(1.f));
-                Variable dd = pc - (a + t * e);
-                return F::Sqrt(F::Dot(dd, dd) + 1e-12f);
-            };
-            const auto edge_cross = [&](const Variable& a,
-                                        const Variable& b) {
-                Variable e = b - a;
-                return F::GetX(e) * (F::GetY(pc) - F::GetY(a)) -
-                       F::GetY(e) * (F::GetX(pc) - F::GetX(a));
-            };
-            Variable dmin = F::Min(F::Min(edge_dist(s0, s1),
-                                          edge_dist(s1, s2)),
-                                   edge_dist(s2, s0));
-            Variable cr0 = edge_cross(s0, s1);
-            Variable cr1 = edge_cross(s1, s2);
-            Variable cr2 = edge_cross(s2, s0);
             Variable zero = F::Float(0.f);
-            Variable inside =
-                    F::Min(F::Step(zero, cr0) * F::Step(zero, cr1) *
-                                           F::Step(zero, cr2) +
-                                   F::Step(zero, -cr0) *
-                                           F::Step(zero, -cr1) *
-                                           F::Step(zero, -cr2),
-                           F::Float(1.f));
-            Variable dist = (inside * 2.f - 1.f) * dmin;
-            Variable soft_sil = mask * F::Sigmoid(dist * sigma_scale);
+            Variable one = F::Float(1.f);
+
+            // D_k = mask * sigmoid(dist / sigma) built from a face-ID
+            // buffer with image-space ops (backward: FaceFetch sampling +
+            // AD; adam_t doubles as the per-iteration jitter seed)
+            const auto soft_prob = [&](const Variable& idx) {
+                Variable mask = F::Greater(idx, F::Float(0.5f));
+                const auto fetch = [&](const Variable& tri) {
+                    return F::FaceFetch(tri, idx, tri0, tri1, tri2, adam_t,
+                                        opt.radius_px, opt.samples);
+                };
+                const auto screen_of = [&](const Variable& c) {
+                    Variable w = F::GetW(c) + (1.f - mask);
+                    Variable sx = (F::GetX(c) / w * 0.5f + 0.5f) *
+                                  float(screen.w);
+                    Variable sy = (F::GetY(c) / w * 0.5f + 0.5f) *
+                                  float(screen.h);
+                    return F::Vec2(sx, sy);
+                };
+                Variable s0 = screen_of(fetch(tri0));
+                Variable s1 = screen_of(fetch(tri1));
+                Variable s2 = screen_of(fetch(tri2));
+                const auto edge_dist = [&](const Variable& a,
+                                           const Variable& b) {
+                    Variable e = b - a;
+                    Variable t = F::Clamp(F::Dot(pc - a, e) /
+                                                  (F::Dot(e, e) + 1e-12f),
+                                          zero, one);
+                    Variable dd = pc - (a + t * e);
+                    return F::Sqrt(F::Dot(dd, dd) + 1e-12f);
+                };
+                const auto edge_cross = [&](const Variable& a,
+                                            const Variable& b) {
+                    Variable e = b - a;
+                    return F::GetX(e) * (F::GetY(pc) - F::GetY(a)) -
+                           F::GetY(e) * (F::GetX(pc) - F::GetX(a));
+                };
+                Variable dmin = F::Min(F::Min(edge_dist(s0, s1),
+                                              edge_dist(s1, s2)),
+                                       edge_dist(s2, s0));
+                Variable cr0 = edge_cross(s0, s1);
+                Variable cr1 = edge_cross(s1, s2);
+                Variable cr2 = edge_cross(s2, s0);
+                Variable inside =
+                        F::Min(F::Step(zero, cr0) * F::Step(zero, cr1) *
+                                               F::Step(zero, cr2) +
+                                       F::Step(zero, -cr0) *
+                                               F::Step(zero, -cr1) *
+                                               F::Step(zero, -cr2),
+                               one);
+                Variable dist = (inside * 2.f - 1.f) * dmin;
+                return mask * F::Sigmoid(dist * sigma_scale);
+            };
+
+            // Alg.2 depth peeling: peel k discards fragments at or in
+            // front of peel k-1's shifted depth; Eq.6 silhouette blending
+            // I_s = 1 - prod_k (1 - D_k)
+            Variable one_minus = one;
+            Variable prev_shift(nullptr);
+            for (uint32_t peel = 0; peel < opt.peels; peel++) {
+                Variable rs = F::StopGradient(
+                        peel == 0
+                                ? F::RasterizeSoft(soft_clip, s_face_id,
+                                                   s_faces_soft, clip_v,
+                                                   s_faces_f, s_vtx_faces,
+                                                   screen, opt.radius_px)
+                                : F::RasterizeSoft(soft_clip, s_face_id,
+                                                   s_faces_soft, clip_v,
+                                                   s_faces_f, s_vtx_faces,
+                                                   prev_shift, screen,
+                                                   opt.radius_px));
+                // Next peel's threshold: this layer's Eq.3 shifted depth
+                // rebuilt from the output channels (0 at background)
+                Variable dist_c = F::GetX(rs);
+                Variable cov = F::GetW(rs);
+                Variable ge = F::Step(zero, dist_c);
+                prev_shift =
+                        cov * (ge * (F::Clamp(F::GetZ(rs), zero, one) *
+                                     0.5f) +
+                               (1.f - ge) *
+                                       (F::Clamp(-dist_c *
+                                                         (1.f /
+                                                          opt.radius_px),
+                                                 zero, one) *
+                                                0.5f +
+                                        0.5f));
+                Variable idx = (F::GetY(rs) + 1.f) * cov;
+                one_minus = one_minus * (1.f - soft_prob(idx));
+            }
+            Variable soft_sil = 1.f - one_minus;
             // Paper Eq.5 spirit: non-edge pixels keep the hard value (kills
-            // the interior seams of the per-face distance at K=1); the
-            // sigmoid band supplies the gradients around the silhouette
+            // the interior seams of the per-face distance); the sigmoid
+            // band supplies the gradients around the silhouette
             Variable hard =
                     F::Rasterize(clip_v, s_ones, s_faces_i, screen);
             view.pred = F::Max(F::StopGradient(hard), soft_sil);

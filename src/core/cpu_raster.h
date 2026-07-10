@@ -45,12 +45,15 @@ CpuTensor RasterizeFaceIdCpu(const CpuTensor& clip, const CpuTensor& faces,
 // CPU reference for F::RasterizeSoft: rasterizes the enlarged (soft)
 // triangles, evaluates the signed distance to the hard face and depth-tests
 // with the Eq.3 depth shift. Output VEC4 (dist_px, face_id, hard_z, coverage).
+// prev_shifted_depth (optional, {S,S} FLOAT): depth-peeling input -- a
+// fragment whose Eq.3-shifted depth is <= prev + 1e-4 is discarded.
 CpuTensor RasterizeSoftCpu(const CpuTensor& soft_clip,
                            const CpuTensor& face_id,
                            const CpuTensor& faces_soft,
                            const CpuTensor& hard_clip,
                            const CpuTensor& faces_tex, ImgSize screen,
-                           float radius_px);
+                           float radius_px,
+                           const CpuTensor* prev_shifted_depth = nullptr);
 
 // Projects clip vertex `v` (VEC4) to screen pixels; z = NDC depth [0,1].
 // Returns false when |w| <= eps or w < 0 (behind the camera).
