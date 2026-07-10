@@ -49,6 +49,7 @@ struct Options {
     float radius_px = 3.f;
     float lr = 0.01f;
     float laplacian = 0.5f;  // relative to the data-gradient RMS
+    float normal = 0.5f;     // normal consistency, same relative scale
 };
 
 Options ParseArgs(int argc, char* argv[]) {
@@ -75,6 +76,8 @@ Options ParseArgs(int argc, char* argv[]) {
             opt.lr = std::stof(value);
         } else if (key == "--laplacian") {
             opt.laplacian = std::stof(value);
+        } else if (key == "--normal") {
+            opt.normal = std::stof(value);
         } else if (a.rfind("--", 0) != 0) {
             opt.data_dir = a;
         } else {
@@ -293,6 +296,7 @@ int main(int argc, char* argv[]) try {
 
     // ---------------------------- Optimization ----------------------------
     const auto adj = BuildVertexAdjacency(sphere.faces, n_verts);
+    const auto face_adj = BuildFaceAdjacency(sphere.faces);
     AdamState adam;
     std::vector<float> grad_acc(size_t(n_verts) * 3, 0.f);
 
@@ -318,15 +322,24 @@ int main(int argc, char* argv[]) try {
                 grad_acc[i] += g_pos.data[i];
             }
         }
-        // Uniform-Laplacian regularizer, weighted relative to the data
-        // gradient so smoothing fades out as the fit converges
+        // Regularizers (uniform Laplacian + normal consistency), weighted
+        // relative to the data gradient so smoothing fades as the fit
+        // converges. The Laplacian evens vertex spacing; normal consistency
+        // penalizes creases and flipped faces the Laplacian cannot see.
         CpuImage g_data(n_verts, 1, 3);
         g_data.data = grad_acc;
+        const float data_rms = Rms(g_data);
         const CpuImage g_lap = UniformLaplacianGrad(sphere.pos, adj, 1.f);
         const float lap_scale =
-                opt.laplacian * Rms(g_data) / std::max(Rms(g_lap), 1e-12f);
+                opt.laplacian * data_rms / std::max(Rms(g_lap), 1e-12f);
+        const CpuImage g_nrm =
+                NormalConsistencyGrad(sphere.pos, sphere.faces, face_adj,
+                                      1.f);
+        const float nrm_scale =
+                opt.normal * data_rms / std::max(Rms(g_nrm), 1e-12f);
         for (size_t i = 0; i < grad_acc.size(); i++) {
-            grad_acc[i] += lap_scale * g_lap.data[i];
+            grad_acc[i] += lap_scale * g_lap.data[i] +
+                           nrm_scale * g_nrm.data[i];
         }
         AdamStep(adam, sphere.pos.data, grad_acc, opt.lr);
         send_sphere();
@@ -382,10 +395,13 @@ int main(int argc, char* argv[]) try {
     SaveImagePng(out_dir + "/pred_last.png", TileImages(preds, tile_cols));
     SaveObjMesh(out_dir + "/optimized.obj", sphere);
 
+    const uint32_t flipped =
+            CountFlippedFacePairs(sphere.pos, sphere.faces, face_adj);
     spdlog::info("loss {:.8f} -> {:.8f} ({:.1f}x), mean silhouette IoU"
-                 " {:.4f}",
+                 " {:.4f}, flipped face pairs {} / {}",
                  first_loss, last_loss,
-                 first_loss / std::max(last_loss, 1e-12f), mean_iou);
+                 first_loss / std::max(last_loss, 1e-12f), mean_iou,
+                 flipped, face_adj.size());
     spdlog::info("outputs in {}/", out_dir);
     // Note: the hardsoftras loss has an inherent floor (the sigmoid ramp of
     // pred vs the hard 0/1 target along the silhouette band), so judge by

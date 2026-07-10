@@ -25,6 +25,24 @@ dressi::CpuImage UniformLaplacianGrad(
         const dressi::CpuImage& pos,
         const std::vector<std::vector<uint32_t>>& adj, float lambda);
 
+// Adjacent face pairs sharing an edge (each unordered pair once)
+std::vector<std::array<uint32_t, 2>> BuildFaceAdjacency(
+        const dressi::CpuImage& faces);
+
+// Normal-consistency regularization gradient {V,1,3} of
+// lambda * sum_{adjacent faces (f,g)} (1 - n_f . n_g)
+// (analytic through the normalized cross products; penalizes creases and
+// flipped faces that a positional Laplacian cannot see)
+dressi::CpuImage NormalConsistencyGrad(
+        const dressi::CpuImage& pos, const dressi::CpuImage& faces,
+        const std::vector<std::array<uint32_t, 2>>& face_adj, float lambda);
+
+// Number of adjacent face pairs whose normals disagree (n_f . n_g < 0) --
+// a direct count of flipped/creased faces for diagnostics
+uint32_t CountFlippedFacePairs(
+        const dressi::CpuImage& pos, const dressi::CpuImage& faces,
+        const std::vector<std::array<uint32_t, 2>>& face_adj);
+
 // Per-face unwelded soft geometry for HardSoftRas: triangles enlarged by
 // `radius_px` in screen space (scaled about the centroid), face index as a
 // per-vertex attribute, and sequential faces (3i, 3i+1, 3i+2).
