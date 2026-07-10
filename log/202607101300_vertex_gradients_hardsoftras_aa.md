@@ -348,3 +348,19 @@ statistics plateau around IoU 0.92 (16000 iters, K=3, 16 samples) vs
 0.98 for all-views -- kept as an opt-in speed mode. The remaining
 levers toward the paper's per-pass cost are uif_vars (real uniforms)
 and zero-copy optimizer aliasing.
+
+## Follow-up: the paper's Avocado benchmark via glTF (this commit)
+
+tinygltf-based LoadGltfMesh + --mesh/--init-scale self-reconstruction
+mode. With glTF-Sample-Models' Avocado (406v/682f -- Table 4's exact
+mesh), 1 view, full iteration:
+
+| resolution | paper (RTX 2080) | ours K=1 | ours K=3 |
+|---|---|---|---|
+| 256^2  | 0.304 | 0.20 | 0.39 |
+| 512^2  | 0.442 | 0.28 | 0.65 |
+| 1024^2 | 1.034 | 0.58 | 1.38 |
+| 2048^2 | 3.301 | 1.54 | 4.49 |
+
+Self-reconstruction from a 0.8x shrunken copy converges to IoU 0.9858
+(2000 iters, K=3, 16 samples, 1 flipped pair of 961).
