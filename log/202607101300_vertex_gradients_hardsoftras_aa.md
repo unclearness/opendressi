@@ -332,3 +332,19 @@ the remaining known deviations (uif_vars uniforms, zero-copy optimizer
 aliasing, COMP reductions) map exactly onto it. The AA technique is
 nearly resolution-independent thanks to the same-ID early-out in its
 8-neighbor forward.
+
+## Follow-up: pass-overhead squeeze + --single-view (this commit)
+
+F::SumAll collapses the regularizer RMS reduction chains (~30 tiny
+passes -> 3); the hardsoftras hard mask is derived from the frontal
+peel's channels (one raster pass saved per view); F::PixelFetch /
+F::TileFetch select per-iteration parameters (MVP columns, target tiles)
+from static atlases with an in-graph index. --single-view implements the
+paper's random-viewpoint methodology (sine-hash camera pick per
+iteration; a deterministic cycle resonates with Adam's ~10-step momentum
+window and loses ~0.03 IoU): 0.23-0.33 ms/iter at defaults (vs ~0.85
+all-views), but sparse per-view gradients + Adam second-moment
+statistics plateau around IoU 0.92 (16000 iters, K=3, 16 samples) vs
+0.98 for all-views -- kept as an opt-in speed mode. The remaining
+levers toward the paper's per-pass cost are uif_vars (real uniforms)
+and zero-copy optimizer aliasing.
