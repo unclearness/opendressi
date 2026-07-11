@@ -454,3 +454,234 @@ TEST(CpuEval, RasterizeDepthAndBackground) {
         EXPECT_FLOAT_EQ(out2.data[size_t(y) * screen.w + 6], 0.f);
     }
 }
+
+// --------------------------------- IBL ops -----------------------------------
+
+namespace {
+
+CpuTensor FillTensor(VType vtype, ImgSize size,
+                     const std::function<float(size_t)>& gen) {
+    CpuTensor t;
+    t.vtype = vtype;
+    t.size = size;
+    t.data.resize(size_t(size.w) * size.h * NumComponents(vtype));
+    for (size_t i = 0; i < t.data.size(); i++) {
+        t.data[i] = gen(i);
+    }
+    return t;
+}
+
+}  // namespace
+
+TEST(CpuEval, EquirectSampleConstantEnvAndZeroDir) {
+    const ImgSize env_size = {8, 4};
+    Variable env(VEC3, env_size);
+    Variable dir(VEC3, {6, 1});
+    Variable out = F::EquirectSample(env, dir);
+    EXPECT_EQ(out.getVType(), VEC3);
+    EXPECT_EQ(out.getImgSize(), (ImgSize{6, 1}));
+
+    CpuEvaluator ev;
+    ev.bind(env, FillTensor(VEC3, env_size, [](size_t i) {
+                return float(i % 3) * 0.25f + 0.1f;  // (0.1, 0.35, 0.6)
+            }));
+    // Poles, seam-adjacent, axis dirs, unnormalized, and zero (background)
+    CpuTensor dirs;
+    dirs.vtype = VEC3;
+    dirs.size = {6, 1};
+    dirs.data = {0.f, 1.f,  0.f,   0.f, -1.f, 0.f,  -1.f, 0.f, 1e-4f,
+                 2.f, 0.5f, -1.f,  0.f, 0.f,  1.f,  0.f,  0.f, 0.f};
+    ev.bind(dir, dirs);
+
+    const CpuTensor y = ev.eval(out);
+    for (uint32_t p = 0; p < 5; p++) {
+        EXPECT_NEAR(y.data[p * 3 + 0], 0.1f, 1e-5f) << p;
+        EXPECT_NEAR(y.data[p * 3 + 1], 0.35f, 1e-5f) << p;
+        EXPECT_NEAR(y.data[p * 3 + 2], 0.6f, 1e-5f) << p;
+    }
+    // Zero-length direction returns 0 (rasterizer background)
+    for (uint32_t c = 0; c < 3; c++) {
+        EXPECT_FLOAT_EQ(y.data[5 * 3 + c], 0.f);
+    }
+}
+
+TEST(CpuEval, EquirectSampleSeamContinuity) {
+    const ImgSize env_size = {16, 8};
+    Variable env(VEC3, env_size);
+    Variable dir(VEC3, {2, 1});
+    Variable out = F::EquirectSample(env, dir);
+
+    CpuEvaluator ev;
+    ev.bind(env, FillTensor(VEC3, env_size, [](size_t i) {
+                return 0.05f + 0.13f * float((i * 7) % 29) / 29.f;
+            }));
+    // phi = pi - eps vs -pi + eps: the u = 1/0 wrap must interpolate the
+    // same two texel columns
+    const float eps = 1e-4f;
+    CpuTensor dirs;
+    dirs.vtype = VEC3;
+    dirs.size = {2, 1};
+    dirs.data = {-std::cos(eps), 0.2f, std::sin(eps),
+                 -std::cos(eps), 0.2f, -std::sin(eps)};
+    ev.bind(dir, dirs);
+
+    const CpuTensor y = ev.eval(out);
+    for (uint32_t c = 0; c < 3; c++) {
+        EXPECT_NEAR(y.data[c], y.data[3 + c], 1e-3f) << "channel " << c;
+    }
+}
+
+TEST(CpuEval, TextureBilinearExactInterpolation) {
+    const ImgSize tex_size = {2, 2};
+    Variable tex(FLOAT, tex_size);
+    Variable uv(VEC2, {4, 1});
+    Variable inv_uv(VEC4, tex_size);  // forward ignores it
+    Variable out = F::TextureBilinear(tex, uv, inv_uv);
+
+    CpuEvaluator ev;
+    CpuTensor tex_t;
+    tex_t.vtype = FLOAT;
+    tex_t.size = tex_size;
+    tex_t.data = {0.f, 1.f, 2.f, 3.f};
+    ev.bind(tex, tex_t);
+    ev.bind(inv_uv, FillTensor(VEC4, tex_size, [](size_t) { return 0.f; }));
+    CpuTensor uvs;
+    uvs.vtype = VEC2;
+    uvs.size = {4, 1};
+    uvs.data = {0.25f, 0.25f,   // texel (0,0) center -> 0
+                0.75f, 0.75f,   // texel (1,1) center -> 3
+                0.5f,  0.5f,    // center of all four -> 1.5
+                0.5f,  0.25f};  // midpoint of top row -> 0.5
+    ev.bind(uv, uvs);
+
+    const CpuTensor y = ev.eval(out);
+    EXPECT_NEAR(y.data[0], 0.f, 1e-6f);
+    EXPECT_NEAR(y.data[1], 3.f, 1e-6f);
+    EXPECT_NEAR(y.data[2], 1.5f, 1e-6f);
+    EXPECT_NEAR(y.data[3], 0.5f, 1e-6f);
+}
+
+TEST(CpuEval, IrradianceConvConstantEnv) {
+    const ImgSize env_size = {16, 8};
+    const ImgSize out_size = {8, 4};
+    Variable env(VEC3, env_size);
+    Variable irr = F::IrradianceConv(env, out_size);
+    EXPECT_EQ(irr.getVType(), VEC3);
+    EXPECT_EQ(irr.getImgSize(), out_size);
+
+    CpuEvaluator ev;
+    ev.bind(env, FillTensor(VEC3, env_size,
+                            [](size_t i) { return i % 3 == 0 ? 0.8f : 0.3f; }));
+    const CpuTensor y = ev.eval(irr);
+    // Stored E(N)/pi: a constant environment L0 maps to exactly L0
+    // (up to the midpoint-rule discretization of the 16x8 source)
+    for (size_t p = 0; p < y.numPixels(); p++) {
+        EXPECT_NEAR(y.data[p * 3 + 0], 0.8f, 0.8f * 0.02f) << p;
+        EXPECT_NEAR(y.data[p * 3 + 1], 0.3f, 0.3f * 0.02f) << p;
+        EXPECT_NEAR(y.data[p * 3 + 2], 0.3f, 0.3f * 0.02f) << p;
+    }
+}
+
+TEST(CpuEval, PrefilterEnvConstantEnv) {
+    const ImgSize env_size = {16, 8};
+    Variable env(VEC3, env_size);
+    CpuTensor env_t = FillTensor(VEC3, env_size, [](size_t i) {
+        return i % 3 == 1 ? 0.7f : 0.2f;
+    });
+    for (float rough : {0.f, 0.5f, 1.f}) {
+        Variable pref = F::PrefilterEnv(env, {4, 2}, rough, 16);
+        CpuEvaluator ev;
+        ev.bind(env, env_t);
+        const CpuTensor y = ev.eval(pref);
+        // NoL-weighted average of a constant is exactly the constant
+        for (size_t p = 0; p < y.numPixels(); p++) {
+            EXPECT_NEAR(y.data[p * 3 + 0], 0.2f, 1e-4f) << rough << " " << p;
+            EXPECT_NEAR(y.data[p * 3 + 1], 0.7f, 1e-4f) << rough << " " << p;
+            EXPECT_NEAR(y.data[p * 3 + 2], 0.2f, 1e-4f) << rough << " " << p;
+        }
+    }
+}
+
+TEST(CpuEval, BrdfIntegrationLutShape) {
+    const ImgSize size = {8, 8};
+    Variable lut = F::BrdfIntegrationLut(size, 64);
+    EXPECT_EQ(lut.getVType(), VEC2);
+    EXPECT_EQ(lut.getImgSize(), size);
+
+    CpuEvaluator ev;
+    const CpuTensor y = ev.eval(lut);
+    for (size_t p = 0; p < y.numPixels(); p++) {
+        const float a = y.data[p * 2 + 0];
+        const float b = y.data[p * 2 + 1];
+        EXPECT_TRUE(std::isfinite(a) && std::isfinite(b)) << p;
+        EXPECT_GE(a, 0.f);
+        EXPECT_LE(a, 1.05f);
+        EXPECT_GE(b, 0.f);
+        EXPECT_LE(b, 1.05f);
+    }
+    // High NdotV, low roughness: full specular scale, no bias
+    const size_t corner = (0 * size.w + (size.w - 1)) * 2;
+    EXPECT_GT(y.data[corner + 0], 0.9f);
+    EXPECT_LT(y.data[corner + 1], 0.05f);
+    // The scale term decays with roughness at fixed mid NdotV
+    const uint32_t mid_x = size.w / 2;
+    const float a_smooth = y.data[(0 * size.w + mid_x) * 2];
+    const float a_rough = y.data[(size_t(size.h - 1) * size.w + mid_x) * 2];
+    EXPECT_GT(a_smooth, a_rough);
+}
+
+TEST(CpuEval, AvgPool2x2Exact) {
+    Variable x(FLOAT, {4, 2});
+    Variable y = F::AvgPool2x2(x);
+    EXPECT_EQ(y.getImgSize(), (ImgSize{2, 1}));
+
+    CpuEvaluator ev;
+    CpuTensor t;
+    t.vtype = FLOAT;
+    t.size = {4, 2};
+    t.data = {1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 7.f, 8.f};
+    ev.bind(x, t);
+    const CpuTensor out = ev.eval(y);
+    EXPECT_FLOAT_EQ(out.data[0], (1.f + 2.f + 5.f + 6.f) * 0.25f);
+    EXPECT_FLOAT_EQ(out.data[1], (3.f + 4.f + 7.f + 8.f) * 0.25f);
+}
+
+TEST(CpuEval, IblBuildersConstantEnv) {
+    const ImgSize env_size = {64, 32};
+    Variable env(VEC3, env_size);
+    Variable dir(VEC3, {2, 1});
+    Variable rough(FLOAT, {1, 1});
+
+    Variable irr = BuildIrradianceSample(env, {8, 4});
+    std::vector<Variable> pref = BuildPrefEnvironmentSample(env, 3, {8, 4}, 16);
+    Variable lut = BuildBrdfIntegrationMap({8, 8}, 32);
+    Variable s_irr = SampleIrradiance(irr, dir);
+    Variable s_pref = SamplePrefEnvironment(pref, dir, rough);
+
+    CpuEvaluator ev;
+    ev.bind(env, FillTensor(VEC3, env_size, [](size_t i) {
+                return i % 3 == 0 ? 0.5f : (i % 3 == 1 ? 0.2f : 0.3f);
+            }));
+    CpuTensor dirs;
+    dirs.vtype = VEC3;
+    dirs.size = {2, 1};
+    dirs.data = {0.3f, 0.8f, -0.5f, -1.f, 0.2f, 0.4f};
+    ev.bind(dir, dirs);
+    ev.bind(rough, ScalarTensor(0.3f));
+
+    // Constant env survives pooling exactly, irradiance within the
+    // midpoint-rule error, prefilter exactly; the LOD tent weights sum to 1
+    const float expect[3] = {0.5f, 0.2f, 0.3f};
+    const CpuTensor yi = ev.eval(s_irr);
+    const CpuTensor yp = ev.eval(s_pref);
+    for (uint32_t p = 0; p < 2; p++) {
+        for (uint32_t c = 0; c < 3; c++) {
+            EXPECT_NEAR(yi.data[p * 3 + c], expect[c], expect[c] * 0.02f);
+            EXPECT_NEAR(yp.data[p * 3 + c], expect[c], 1e-3f);
+        }
+    }
+    const CpuTensor yl = ev.eval(lut);
+    for (float v : yl.data) {
+        EXPECT_TRUE(std::isfinite(v));
+    }
+}

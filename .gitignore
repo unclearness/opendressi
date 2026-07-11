@@ -34,3 +34,4 @@ __pycache__/
 # Datasets
 /data/
 /third_party/glad.zip
+/pbr_out/

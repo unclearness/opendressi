@@ -264,6 +264,44 @@ Variable NormalConsistencyVertexGrad(const Variable& face_term,
 Variable Texture(const Variable& tex, const Variable& uv,
                  const Variable& inv_uv);
 
+// ---------------------------- IBL (split-sum) --------------------------------
+// Building blocks for image-based lighting with equirectangular maps (no
+// cubemaps / hardware mips in this IR — a documented deviation). The
+// precompute ops are forward-only; with a static env leaf the reactive
+// cache executes them once and prunes them from the steady-state frame.
+// See include/dressi/ibl.h for the paper-appendix-shaped builders.
+
+// Bilinear (4-tap, clamp-to-edge) counterpart of Texture. Differentiable
+// w.r.t. the texture through the same inverse-UV table (tent-weighted
+// gather); not differentiable w.r.t. uv.
+Variable TextureBilinear(const Variable& tex, const Variable& uv,
+                         const Variable& inv_uv);
+
+// Samples an equirectangular map by per-pixel direction (need not be
+// normalized; zero-length directions return 0). Bilinear with u-wrap at
+// the seam and v-clamp at the poles. Forward-only.
+Variable EquirectSample(const Variable& map, const Variable& dir);
+
+// Diffuse irradiance convolution of an equirect environment: deterministic
+// cos-weighted sum over EVERY source texel per output texel (cost =
+// out_texels * src_texels — pre-pool the source). Stores E(N)/pi, so a
+// constant environment L0 yields exactly L0. Forward-only.
+Variable IrradianceConv(const Variable& env, ImgSize out_size);
+
+// Split-sum prefiltered environment for one roughness level (GGX
+// importance sampling, V=N=R, Hammersley, NoL-weighted). Forward-only.
+Variable PrefilterEnv(const Variable& env, ImgSize out_size, float roughness,
+                      uint32_t n_samples = 256);
+
+// Split-sum BRDF integration LUT: VEC2 (scale A, bias B) indexed by
+// (NdotV, roughness) texel centers; Smith-G with k = roughness^2/2.
+// No inputs — always static. Forward-only.
+Variable BrdfIntegrationLut(ImgSize size, uint32_t n_samples = 512);
+
+// 2x2 box average (Reduce2x2Sum * 0.25); differentiable. Odd extents
+// zero-pad, so prefer power-of-two sizes.
+Variable AvgPool2x2(const Variable& x);
+
 }  // namespace F
 
 // ----------------------------- Operator overloads -----------------------------

@@ -18,6 +18,8 @@ ctest --preset release -LE gpu       # CPU-only (no Vulkan device needed)
 ./build/examples/Release/silhouette_optimization.exe data/bunny --technique=hardsoftras
 ./build/examples/Release/silhouette_optimization.exe data/bunny --technique=aa
 ./build/examples/Release/silhouette_optimization.exe --mesh=data/Avocado/glTF/Avocado.gltf
+./build/examples/Release/pbr_shading.exe                  # DamagedHelmet PBS viewer
+./build/examples/Release/pbr_shading.exe --frames=60      # headless orbit + PNGs
 ```
 
 - Datasets live in `data/` (git-ignored — large/licensed) and are downloaded
@@ -98,7 +100,11 @@ inputs changed (reactive cache).
   `__rasterize_soft__ r=<px>`, `__rasterize_face_id__`,
   `__gather_dist_grad__`, `__antialias__`, `__antialias_bwd_img__`,
   `__antialias_bwd_vtx__`, `__col_sum__`, `__sum_all__`,
-  `__sum_partial__`). The per-vertex gather backwards (GatherDistGrad,
+  `__sum_partial__`, and the IBL set `__equirect_sample__`,
+  `__sample_bilinear__`, `__gather_inv_uv_bilinear__`,
+  `__irradiance_conv__`, `__prefilter_env__ r= n=`, `__brdf_lut__ n=`
+  with `dressi_*` GLSL helpers mirrored bit-for-bit(-ish) in
+  `core/ibl_math.h` for the CPU oracle). The per-vertex gather backwards (GatherDistGrad,
   AntiAliasBwdVtx) default to WIDE (`wide=1` marker): {V,max_deg}
   partials (one incident face per thread) + `__col_sum__` — a {V,1}
   target runs only V threads and is brutally latency-bound.
@@ -198,6 +204,24 @@ inputs changed (reactive cache).
   pixel-center coverage flips (gradients, not forward continuity, are the
   deliverable).
 - Not yet from the paper: texture backward w.r.t. UV.
+- IBL (split-sum PBS, `include/dressi/ibl.h`): everything is
+  EQUIRECTANGULAR 2D — no cubemaps, no hardware mips, no linear samplers.
+  `BuildPrefEnvironmentSample` returns per-roughness-level Variables
+  (fractional LOD = in-graph tent-weight blend) instead of the appendix's
+  single pref_img. All bilinear filtering is manual 4-tap texelFetch
+  inside the special ops (`__equirect_sample__` u-wraps at the seam;
+  hardware `texture()` bilinear would break GPU-vs-CPU parity and the
+  clamp sampler would break the seam). Precompute ops (IrradianceConv /
+  PrefilterEnv / BrdfIntegrationLut) are forward-only: with a static env
+  leaf the reactive cache runs them once and prunes them (pbr_shading:
+  12 stages warmup -> 5 steady). `F::TextureBilinear` IS differentiable
+  w.r.t. the texture via `__gather_inv_uv_bilinear__` (tent-weighted
+  variant of the inverse-UV gather; it accumulates EVERY contributing
+  pixel, so stable optimizer steps are ~sum(w^2) smaller than the
+  nearest gather's one-pixel step — see test_ibl_gpu.cpp).
+- glTF UV convention: `LoadGltfScene` does NOT flip V (glTF is top-left
+  origin, matching image row 0); the older `LoadGltfMesh` keeps its 1-v
+  flip (OBJ-ism) for compatibility with existing examples.
 
 ## Work logs
 

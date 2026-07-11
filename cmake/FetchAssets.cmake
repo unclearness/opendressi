@@ -58,21 +58,28 @@ if(NOT EXISTS "${_data_dir}/bunny/bunny.obj")
         DESTINATION "${_data_dir}/bunny")
 endif()
 
-# --- Avocado (glTF-Sample-Models 2.0): the paper's Table 4 mesh -----------
+# --- glTF-Sample-Models 2.0 meshes: Avocado (Table 4) + DamagedHelmet (PBS)
 # Pulled via a full git clone of the sample-models repo (~1.2 GB), then only
-# Avocado's glTF is copied into data/ so runtime paths stay uniform with the
-# rest of data/. Guarded on the copied file so the huge clone happens at most
-# once per machine (skipped whenever data/Avocado is already present).
-if(NOT EXISTS "${_data_dir}/Avocado/glTF/Avocado.gltf")
-    message(STATUS "dressi: cloning glTF-Sample-Models for Avocado (large, one-time)")
+# the needed glTF folders are copied into data/ so runtime paths stay uniform
+# with the rest of data/. Guarded on the copied files so the huge clone
+# happens at most once per machine (skipped whenever every model is present).
+if(NOT EXISTS "${_data_dir}/Avocado/glTF/Avocado.gltf" OR
+   NOT EXISTS "${_data_dir}/DamagedHelmet/glTF/DamagedHelmet.gltf")
+    message(STATUS "dressi: cloning glTF-Sample-Models (large, one-time)")
     FetchContent_Declare(gltf_sample_models
         GIT_REPOSITORY https://github.com/KhronosGroup/glTF-Sample-Models.git
         GIT_TAG main
         GIT_SHALLOW TRUE
         SOURCE_SUBDIR nonexistent_disable_add_subdirectory)
     FetchContent_MakeAvailable(gltf_sample_models)
-    file(COPY "${gltf_sample_models_SOURCE_DIR}/2.0/Avocado/glTF"
-        DESTINATION "${_data_dir}/Avocado")
+    if(NOT EXISTS "${_data_dir}/Avocado/glTF/Avocado.gltf")
+        file(COPY "${gltf_sample_models_SOURCE_DIR}/2.0/Avocado/glTF"
+            DESTINATION "${_data_dir}/Avocado")
+    endif()
+    if(NOT EXISTS "${_data_dir}/DamagedHelmet/glTF/DamagedHelmet.gltf")
+        file(COPY "${gltf_sample_models_SOURCE_DIR}/2.0/DamagedHelmet/glTF"
+            DESTINATION "${_data_dir}/DamagedHelmet")
+    endif()
 endif()
 
 # --- Environment map for the upcoming PBS shading (polyhaven 4k EXR) -------

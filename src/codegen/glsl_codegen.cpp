@@ -197,6 +197,14 @@ std::string GenerateShaderImpl(const SubStage& ss, bool comp) {
     bool needs_aa_helper = false;
     bool needs_face_cross = false;
     bool needs_hash = false;
+    // IBL helpers (CPU twins in core/ibl_math.h — keep formulas identical)
+    bool needs_equirect_uv = false;
+    bool needs_dir_from_equirect = false;
+    bool needs_bilerp_wrap = false;
+    bool needs_bilerp_clamp = false;
+    bool needs_hammersley = false;
+    bool needs_ggx_sample = false;
+    bool needs_g1_ibl = false;
     for (const auto& f : ss.funcs) {
         const std::string& c = NodeAccess::Node(f)->fwd_code;
         if (c == "__antialias__" || c == "__antialias_bwd_img__" ||
@@ -209,6 +217,22 @@ std::string GenerateShaderImpl(const SubStage& ss, bool comp) {
         if (c.rfind("__face_fetch_bwd__", 0) == 0 ||
             c.rfind("__antialias_bwd_vtx__", 0) == 0) {
             needs_hash = true;
+        }
+        if (c == "__equirect_sample__") {
+            needs_equirect_uv = needs_bilerp_wrap = true;
+        }
+        if (c == "__sample_bilinear__") {
+            needs_bilerp_clamp = true;
+        }
+        if (c == "__irradiance_conv__") {
+            needs_dir_from_equirect = true;
+        }
+        if (c.rfind("__prefilter_env__", 0) == 0) {
+            needs_dir_from_equirect = needs_equirect_uv = needs_bilerp_wrap =
+                    needs_hammersley = needs_ggx_sample = true;
+        }
+        if (c.rfind("__brdf_lut__", 0) == 0) {
+            needs_hammersley = needs_ggx_sample = needs_g1_ibl = true;
         }
     }
     if (needs_hash) {
@@ -286,6 +310,95 @@ bool dressi_aa_pair(sampler2D tri, sampler2D vclip, sampler2D faces,
 )";
     }
 
+    if (needs_equirect_uv) {
+        head << R"(vec2 dressi_equirect_uv(vec3 d) {
+    return vec2(atan(d.z, d.x) * 0.159154943091895336 + 0.5,
+                acos(clamp(d.y, -1.0, 1.0)) * 0.318309886183790672);
+}
+)";
+    }
+    if (needs_dir_from_equirect) {
+        head << R"(vec3 dressi_dir_from_equirect(vec2 uv) {
+    float phi = (uv.x - 0.5) * 6.28318530717958648;
+    float theta = uv.y * 3.14159265358979324;
+    float st = sin(theta);
+    return vec3(st * cos(phi), cos(theta), st * sin(phi));
+}
+)";
+    }
+    if (needs_bilerp_wrap) {
+        head << R"(vec4 dressi_bilerp_wrap(sampler2D t, ivec2 sz, vec2 uv) {
+    vec2 st = uv * vec2(sz) - 0.5;
+    ivec2 i0 = ivec2(floor(st));
+    vec2 f = st - vec2(i0);
+    vec4 acc = vec4(0.0);
+    for (int dy = 0; dy <= 1; dy++)
+    for (int dx = 0; dx <= 1; dx++) {
+        int x = i0.x + dx;
+        if (x < 0) x += sz.x;
+        if (x >= sz.x) x -= sz.x;
+        int y = clamp(i0.y + dy, 0, sz.y - 1);
+        float w = (dx == 0 ? 1.0 - f.x : f.x) * (dy == 0 ? 1.0 - f.y : f.y);
+        acc += w * texelFetch(t, ivec2(x, y), 0);
+    }
+    return acc;
+}
+)";
+    }
+    if (needs_bilerp_clamp) {
+        head << R"(vec4 dressi_bilerp_clamp(sampler2D t, ivec2 sz, vec2 uv) {
+    vec2 st = uv * vec2(sz) - 0.5;
+    ivec2 i0 = ivec2(floor(st));
+    vec2 f = st - vec2(i0);
+    vec4 acc = vec4(0.0);
+    for (int dy = 0; dy <= 1; dy++)
+    for (int dx = 0; dx <= 1; dx++) {
+        int x = clamp(i0.x + dx, 0, sz.x - 1);
+        int y = clamp(i0.y + dy, 0, sz.y - 1);
+        float w = (dx == 0 ? 1.0 - f.x : f.x) * (dy == 0 ? 1.0 - f.y : f.y);
+        acc += w * texelFetch(t, ivec2(x, y), 0);
+    }
+    return acc;
+}
+)";
+    }
+    if (needs_hammersley) {
+        // Manual bit reversal (no bitfieldReverse) — integer arithmetic
+        // identical to the CPU kernel
+        head << R"(float dressi_radical_inverse(uint bits) {
+    bits = (bits << 16u) | (bits >> 16u);
+    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+    return float(bits) * 2.3283064365386963e-10;
+}
+vec2 dressi_hammersley(uint i, uint n) {
+    return vec2(float(i) / float(n), dressi_radical_inverse(i));
+}
+)";
+    }
+    if (needs_ggx_sample) {
+        head << R"(vec3 dressi_ggx_sample(vec2 xi, float rough, vec3 n) {
+    float a = rough * rough;
+    float phi = 6.28318530717958648 * xi.x;
+    float ct = sqrt((1.0 - xi.y) / (1.0 + (a * a - 1.0) * xi.y));
+    float st = sqrt(max(1.0 - ct * ct, 0.0));
+    vec3 h = vec3(cos(phi) * st, sin(phi) * st, ct);
+    vec3 up = abs(n.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tx = normalize(cross(up, n));
+    vec3 ty = cross(n, tx);
+    return normalize(tx * h.x + ty * h.y + n * h.z);
+}
+)";
+    }
+    if (needs_g1_ibl) {
+        head << R"(float dressi_g1_ibl(float ndx, float k) {
+    return ndx / (ndx * (1.0 - k) + k);
+}
+)";
+    }
+
     body << "void main() {\n";
     if (comp) {
         body << "    ivec2 dressi_coord = ivec2(gl_GlobalInvocationID.xy);\n";
@@ -322,7 +435,13 @@ bool dressi_aa_pair(sampler2D tri, sampler2D vclip, sampler2D faces,
                code.rfind("__face_fetch_bwd__", 0) == 0 ||
                code == "__rasterize__" ||
                code == "__rasterize_face_id__" ||
-               code.rfind("__rasterize_soft__", 0) == 0;
+               code.rfind("__rasterize_soft__", 0) == 0 ||
+               code == "__equirect_sample__" ||
+               code == "__sample_bilinear__" ||
+               code == "__gather_inv_uv_bilinear__" ||
+               code == "__irradiance_conv__" ||
+               code.rfind("__prefilter_env__", 0) == 0 ||
+               code.rfind("__brdf_lut__", 0) == 0;
     };
     std::map<Variable, size_t> slt_binding;
     for (size_t i = 0; i < ss.slt_vars.size(); i++) {
@@ -336,8 +455,20 @@ bool dressi_aa_pair(sampler2D tri, sampler2D vclip, sampler2D faces,
     std::map<Variable, bool> needs_generic_load;
     for (const auto& f : ss.funcs) {
         const bool special = is_special(f);
-        for (const auto& x : f.getInputVars()) {
-            if (slt_binding.count(x) && !special && !tex_binding.count(x)) {
+        const std::string& code = NodeAccess::Node(f)->fwd_code;
+        const Variables fxs = f.getInputVars();
+        for (size_t i = 0; i < fxs.size(); i++) {
+            const Variable& x = fxs[i];
+            // The dir/uv operand of the IBL sampling ops is same-pixel:
+            // when the packer routed it through slt (Naive mode), give it
+            // the generic coordinate load (the map operand is fetched by
+            // the emission block itself)
+            const bool same_pixel_operand =
+                    (code == "__equirect_sample__" ||
+                     code == "__sample_bilinear__") &&
+                    i == 1;
+            if (slt_binding.count(x) && (!special || same_pixel_operand) &&
+                !tex_binding.count(x)) {
                 needs_generic_load[x] = true;
             }
         }
@@ -560,6 +691,201 @@ bool dressi_aa_pair(sampler2D tri, sampler2D vclip, sampler2D faces,
                                          : "v.x + v.y + v.z + v.w")
                      << ";\n";
             }
+            body << "    }\n";
+            continue;
+        }
+        if (node->fwd_code == "__equirect_sample__") {
+            // xs = {map (slt), dir (same-pixel)}; zero-length directions
+            // (rasterizer background) return 0
+            const size_t map_bind = slt_binding.at(xs[0]);
+            const ImgSize map_size = xs[0].getImgSize();
+            const uint32_t n = NumComponents(y.getVType());
+            body << "    " << y_type << " " << y_name << " = " << y_type
+                 << "(0.0);\n";
+            body << "    {\n";
+            body << "        vec3 d = " << input_expr(xs[1]) << ";\n";
+            body << "        float dlen = length(d);\n";
+            body << "        if (dlen >= 1e-8) {\n";
+            body << "            d /= dlen;\n";
+            body << "            " << y_name << " = dressi_bilerp_wrap(u_slt"
+                 << map_bind << ", ivec2(" << map_size.w << ", " << map_size.h
+                 << "), dressi_equirect_uv(d))" << SwizzleOf(n) << ";\n";
+            body << "        }\n";
+            body << "    }\n";
+            continue;
+        }
+        if (node->fwd_code == "__sample_bilinear__") {
+            // xs = {tex (slt), uv (same-pixel)}
+            const size_t tex_bind = slt_binding.at(xs[0]);
+            const ImgSize tex_size = xs[0].getImgSize();
+            const uint32_t n = NumComponents(y.getVType());
+            body << "    " << y_type << " " << y_name
+                 << " = dressi_bilerp_clamp(u_slt" << tex_bind << ", ivec2("
+                 << tex_size.w << ", " << tex_size.h << "), "
+                 << input_expr(xs[1]) << ")" << SwizzleOf(n) << ";\n";
+            continue;
+        }
+        if (node->fwd_code == "__gather_inv_uv_bilinear__") {
+            // xs = {gy_screen, inv_uv, uv_screen}; bilinear-weighted
+            // variant of __gather_inv_uv__: anchor at the (dilated)
+            // inverse-UV entry, then ACCUMULATE every nearby screen
+            // pixel's gradient with the forward's tent weight
+            const size_t gy_bind = slt_binding.at(xs[0]);
+            const size_t iv_bind = slt_binding.at(xs[1]);
+            const size_t uv_bind = slt_binding.at(xs[2]);
+            const ImgSize tex_size = y.getImgSize();
+            const ImgSize scr_size = xs[0].getImgSize();
+            const uint32_t n = NumComponents(y.getVType());
+            body << "    " << y_type << " " << y_name << " = " << y_type
+                 << "(0.0);\n";
+            body << "    {\n";
+            body << "        vec4 iv = texelFetch(u_slt" << iv_bind
+                 << ", dressi_coord, 0);\n";
+            body << "        for (int ny = -4; ny <= 4 && iv.z < 0.5; ny++)"
+                 << " for (int nx = -4; nx <= 4; nx++) {\n";
+            body << "            ivec2 tp = dressi_coord + ivec2(nx, ny);\n";
+            body << "            if (tp.x < 0 || tp.y < 0 || tp.x >= "
+                 << tex_size.w << " || tp.y >= " << tex_size.h
+                 << ") continue;\n";
+            body << "            iv = texelFetch(u_slt" << iv_bind
+                 << ", tp, 0);\n";
+            body << "            if (iv.z > 0.5) break;\n";
+            body << "        }\n";
+            body << "        if (iv.z > 0.5) {\n";
+            body << "            ivec2 sc = ivec2(iv.xy);\n";
+            body << "            for (int dy = -3; dy <= 3; dy++)"
+                 << " for (int dx = -3; dx <= 3; dx++) {\n";
+            body << "                ivec2 sp = sc + ivec2(dx, dy);\n";
+            body << "                if (sp.x < 0 || sp.y < 0 || sp.x >= "
+                 << scr_size.w << " || sp.y >= " << scr_size.h
+                 << ") continue;\n";
+            body << "                vec2 st = texelFetch(u_slt" << uv_bind
+                 << ", sp, 0).xy * vec2(" << tex_size.w << ".0, "
+                 << tex_size.h << ".0) - 0.5;\n";
+            body << "                float w = max(0.0, 1.0 - abs(st.x - "
+                    "float(dressi_coord.x))) * max(0.0, 1.0 - abs(st.y - "
+                    "float(dressi_coord.y)));\n";
+            body << "                if (w > 0.0) { " << y_name
+                 << " += texelFetch(u_slt" << gy_bind << ", sp, 0)"
+                 << SwizzleOf(n) << " * w; }\n";
+            body << "            }\n";
+            body << "        }\n";
+            body << "    }\n";
+            continue;
+        }
+        if (node->fwd_code == "__irradiance_conv__") {
+            // Deterministic cos-weighted direct sum over every source
+            // texel; stores E(N)/pi (CPU twin in F::IrradianceConv)
+            const size_t env_bind = slt_binding.at(xs[0]);
+            const ImgSize src = xs[0].getImgSize();
+            const ImgSize out = y.getImgSize();
+            const uint32_t n = NumComponents(y.getVType());
+            const float scale = 6.28318530717958648f /
+                                (float(src.w) * float(src.h));
+            body << "    " << y_type << " " << y_name << " = " << y_type
+                 << "(0.0);\n";
+            body << "    {\n";
+            body << "        vec3 N = dressi_dir_from_equirect("
+                 << "(vec2(dressi_coord) + 0.5) / vec2(" << out.w << ".0, "
+                 << out.h << ".0));\n";
+            body << "        for (int sy = 0; sy < " << src.h
+                 << "; sy++) {\n";
+            body << "            float sv = (float(sy) + 0.5) / " << src.h
+                 << ".0;\n";
+            body << "            float sin_th = sin(sv * "
+                    "3.14159265358979324);\n";
+            body << "            for (int sx = 0; sx < " << src.w
+                 << "; sx++) {\n";
+            body << "                vec3 d = dressi_dir_from_equirect("
+                 << "vec2((float(sx) + 0.5) / " << src.w
+                 << ".0, sv));\n";
+            body << "                " << y_name << " += texelFetch(u_slt"
+                 << env_bind << ", ivec2(sx, sy), 0)" << SwizzleOf(n)
+                 << " * (max(dot(N, d), 0.0) * sin_th);\n";
+            body << "            }\n";
+            body << "        }\n";
+            body << "        " << y_name << " *= " << FloatLit(scale)
+                 << ";\n";
+            body << "    }\n";
+            continue;
+        }
+        if (node->fwd_code.rfind("__prefilter_env__", 0) == 0) {
+            // GGX-importance-sampled prefilter (split-sum first term,
+            // V=N=R; CPU twin in F::PrefilterEnv)
+            const float rough = std::stof(node->fwd_code.substr(
+                    node->fwd_code.find("r=") + 2));
+            const int n_samples = std::stoi(node->fwd_code.substr(
+                    node->fwd_code.find("n=") + 2));
+            const size_t env_bind = slt_binding.at(xs[0]);
+            const ImgSize src = xs[0].getImgSize();
+            const ImgSize out = y.getImgSize();
+            const uint32_t n = NumComponents(y.getVType());
+            body << "    " << y_type << " " << y_name << " = " << y_type
+                 << "(0.0);\n";
+            body << "    {\n";
+            body << "        vec3 N = dressi_dir_from_equirect("
+                 << "(vec2(dressi_coord) + 0.5) / vec2(" << out.w << ".0, "
+                 << out.h << ".0));\n";
+            body << "        float wsum = 0.0;\n";
+            body << "        for (int i = 0; i < " << n_samples
+                 << "; i++) {\n";
+            body << "            vec2 xi = dressi_hammersley(uint(i), "
+                 << n_samples << "u);\n";
+            body << "            vec3 h = dressi_ggx_sample(xi, "
+                 << FloatLit(rough) << ", N);\n";
+            body << "            vec3 L = normalize(2.0 * dot(N, h) * h - "
+                    "N);\n";
+            body << "            float nol = dot(N, L);\n";
+            body << "            if (nol > 0.0) {\n";
+            body << "                " << y_name
+                 << " += dressi_bilerp_wrap(u_slt" << env_bind << ", ivec2("
+                 << src.w << ", " << src.h
+                 << "), dressi_equirect_uv(L))" << SwizzleOf(n)
+                 << " * nol;\n";
+            body << "                wsum += nol;\n";
+            body << "            }\n";
+            body << "        }\n";
+            body << "        " << y_name << " /= max(wsum, 1e-4);\n";
+            body << "    }\n";
+            continue;
+        }
+        if (node->fwd_code.rfind("__brdf_lut__", 0) == 0) {
+            // Split-sum BRDF integration LUT (scale A, bias B); zero
+            // inputs (CPU twin in F::BrdfIntegrationLut)
+            const int n_samples = std::stoi(node->fwd_code.substr(
+                    node->fwd_code.find("n=") + 2));
+            const ImgSize out = y.getImgSize();
+            body << "    vec2 " << y_name << " = vec2(0.0);\n";
+            body << "    {\n";
+            body << "        float ndv = (float(dressi_coord.x) + 0.5) / "
+                 << out.w << ".0;\n";
+            body << "        float rough = (float(dressi_coord.y) + 0.5) / "
+                 << out.h << ".0;\n";
+            body << "        float k = rough * rough / 2.0;\n";
+            body << "        vec3 V = vec3(sqrt(max(1.0 - ndv * ndv, 0.0)), "
+                    "0.0, ndv);\n";
+            body << "        for (int i = 0; i < " << n_samples
+                 << "; i++) {\n";
+            body << "            vec2 xi = dressi_hammersley(uint(i), "
+                 << n_samples << "u);\n";
+            body << "            vec3 h = dressi_ggx_sample(xi, rough, "
+                    "vec3(0.0, 0.0, 1.0));\n";
+            body << "            vec3 L = normalize(2.0 * dot(V, h) * h - "
+                    "V);\n";
+            body << "            float nol = max(L.z, 0.0);\n";
+            body << "            float noh = max(h.z, 0.0);\n";
+            body << "            float voh = max(dot(V, h), 0.0);\n";
+            body << "            if (nol > 0.0) {\n";
+            body << "                float g = dressi_g1_ibl(ndv, k) * "
+                    "dressi_g1_ibl(nol, k);\n";
+            body << "                float gv = g * voh / max(noh * ndv, "
+                    "1e-8);\n";
+            body << "                float fc = pow(1.0 - voh, 5.0);\n";
+            body << "                " << y_name
+                 << " += vec2((1.0 - fc) * gv, fc * gv);\n";
+            body << "            }\n";
+            body << "        }\n";
+            body << "        " << y_name << " /= " << n_samples << ".0;\n";
             body << "    }\n";
             continue;
         }

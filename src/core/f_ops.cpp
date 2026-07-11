@@ -5,6 +5,7 @@
 #include <string>
 
 #include "core/cpu_raster.h"
+#include "core/ibl_math.h"
 #include "core/infer.h"
 #include "core/node.h"
 #include "core/op_builder.h"
@@ -2603,6 +2604,389 @@ Variable Texture(const Variable& tex, const Variable& uv,
         return GatherByInverseUV(gy, inv_uv, xs[1]);
     };
     return MakeOp(std::move(desc), {tex, uv});
+}
+
+// ---------------------------- IBL (split-sum) --------------------------------
+
+namespace {
+
+// Backward of TextureBilinear w.r.t. the texture: bilinear-weighted variant
+// of GatherByInverseUV. Each texel anchors at its inverse-UV screen entry
+// (same on-the-fly dilation) and accumulates the gradient of every nearby
+// screen pixel whose bilinear footprint covers the texel, with the
+// forward's tent weight.
+Variable GatherByInverseUVBilinear(const Variable& gy_screen,
+                                   const Variable& inv_uv,
+                                   const Variable& uv_screen) {
+    DRESSI_CHECK(inv_uv.getVType() == VEC4,
+                 "GatherByInverseUVBilinear: inv_uv must be VEC4");
+    OpDesc desc;
+    desc.name = "GatherByInverseUVBilinear";
+    // Special-cased by the shader codegen
+    desc.fwd_code = "__gather_inv_uv_bilinear__";
+    desc.input_access = {InputAccess::TexelFetch, InputAccess::TexelFetch,
+                         InputAccess::TexelFetch};
+    desc.infer = [](const Variables& xs) -> std::pair<VType, ImgSize> {
+        return {xs[0].getVType(), xs[1].getImgSize()};
+    };
+    desc.bwd = NullBwd;
+    desc.cpu = [](const std::vector<CpuTensor>& xs) -> CpuTensor {
+        const CpuTensor& gy = xs[0];
+        const CpuTensor& iv_t = xs[1];
+        const CpuTensor& uv_t = xs[2];
+        const int tw = int(iv_t.size.w), th = int(iv_t.size.h);
+        const int sw = int(gy.size.w), sh = int(gy.size.h);
+        const uint32_t n = gy.numComp();
+        CpuTensor out;
+        out.vtype = gy.vtype;
+        out.size = iv_t.size;
+        out.data.assign(size_t(tw) * th * n, 0.f);
+        for (int ty = 0; ty < th; ty++) {
+            for (int tx = 0; tx < tw; tx++) {
+                const float* iv0 =
+                        &iv_t.data[(size_t(ty) * tw + tx) * 4];
+                float iv[4] = {iv0[0], iv0[1], iv0[2], iv0[3]};
+                for (int ny = -4; ny <= 4 && iv[2] < 0.5f; ny++) {
+                    for (int nx = -4; nx <= 4; nx++) {
+                        const int px = tx + nx, py = ty + ny;
+                        if (px < 0 || py < 0 || px >= tw || py >= th) {
+                            continue;
+                        }
+                        const float* q =
+                                &iv_t.data[(size_t(py) * tw + px) * 4];
+                        iv[0] = q[0];
+                        iv[1] = q[1];
+                        iv[2] = q[2];
+                        iv[3] = q[3];
+                        if (iv[2] > 0.5f) {
+                            break;
+                        }
+                    }
+                }
+                if (iv[2] <= 0.5f) {
+                    continue;
+                }
+                const int scx = int(iv[0]), scy = int(iv[1]);
+                float* o = &out.data[(size_t(ty) * tw + tx) * n];
+                for (int dy = -3; dy <= 3; dy++) {
+                    for (int dx = -3; dx <= 3; dx++) {
+                        const int spx = scx + dx, spy = scy + dy;
+                        if (spx < 0 || spy < 0 || spx >= sw || spy >= sh) {
+                            continue;
+                        }
+                        const float* suv =
+                                &uv_t.data[(size_t(spy) * sw + spx) * 2];
+                        const float stx = suv[0] * float(tw) - 0.5f;
+                        const float sty = suv[1] * float(th) - 0.5f;
+                        const float w =
+                                std::max(0.f,
+                                         1.f - std::abs(stx - float(tx))) *
+                                std::max(0.f,
+                                         1.f - std::abs(sty - float(ty)));
+                        if (w > 0.f) {
+                            const float* g =
+                                    &gy.data[(size_t(spy) * sw + spx) * n];
+                            for (uint32_t c = 0; c < n; c++) {
+                                o[c] += g[c] * w;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return out;
+    };
+    return MakeOp(std::move(desc), {gy_screen, inv_uv, uv_screen});
+}
+
+}  // namespace
+
+Variable TextureBilinear(const Variable& tex, const Variable& uv,
+                         const Variable& inv_uv) {
+    const VType tex_type = tex.getVType();
+    DRESSI_CHECK(!IsIntVType(tex_type) && !IsMatrixVType(tex_type),
+                 "TextureBilinear: texture must be a float image");
+    DRESSI_CHECK(!tex.getImgSize().isUniform(),
+                 "TextureBilinear: texture must be a non-uniform image");
+    DRESSI_CHECK(uv.getVType() == VEC2, "TextureBilinear: uv must be VEC2");
+    DRESSI_CHECK(inv_uv.getVType() == VEC4 &&
+                         inv_uv.getImgSize() == tex.getImgSize(),
+                 "TextureBilinear: inv_uv must be VEC4 of the texture size");
+
+    OpDesc desc;
+    desc.name = "TextureBilinear";
+    // Special-cased by the shader codegen (manual 4-tap, clamp-to-edge)
+    desc.fwd_code = "__sample_bilinear__";
+    desc.input_access = {InputAccess::TexelFetch, InputAccess::SamePixel};
+    desc.infer = [tex_type](const Variables& xs)
+            -> std::pair<VType, ImgSize> {
+        return {tex_type, xs[1].getImgSize()};
+    };
+    desc.bwd = [inv_uv](const Variables& xs, const Variable&,
+                        const Variable& gy, uint32_t bwd_idx) -> Variable {
+        if (bwd_idx != 0) {
+            return nullptr;  // not differentiable w.r.t. uv (M2)
+        }
+        return GatherByInverseUVBilinear(gy, inv_uv, xs[1]);
+    };
+    desc.cpu = [](const std::vector<CpuTensor>& xs) -> CpuTensor {
+        const CpuTensor& tex_t = xs[0];
+        const CpuTensor& uv_t = xs[1];
+        const uint32_t n = tex_t.numComp();
+        CpuTensor y;
+        y.vtype = tex_t.vtype;
+        y.size = uv_t.size;
+        y.data.assign(uv_t.numPixels() * n, 0.f);
+        for (size_t p = 0; p < uv_t.numPixels(); p++) {
+            ibl::BilerpClamp(tex_t.data.data(), tex_t.size.w, tex_t.size.h,
+                             n, uv_t.data[p * 2 + 0], uv_t.data[p * 2 + 1],
+                             &y.data[p * n]);
+        }
+        return y;
+    };
+    return MakeOp(std::move(desc), {tex, uv});
+}
+
+Variable EquirectSample(const Variable& map, const Variable& dir) {
+    const VType map_type = map.getVType();
+    DRESSI_CHECK(!IsIntVType(map_type) && !IsMatrixVType(map_type),
+                 "EquirectSample: map must be a float image");
+    DRESSI_CHECK(!map.getImgSize().isUniform(),
+                 "EquirectSample: map must be a non-uniform image");
+    DRESSI_CHECK(dir.getVType() == VEC3, "EquirectSample: dir must be VEC3");
+
+    OpDesc desc;
+    desc.name = "EquirectSample";
+    // Special-cased by the shader codegen (equirect uv + 4-tap bilinear
+    // with u-wrap). Zero-length directions (rasterizer background) return 0.
+    desc.fwd_code = "__equirect_sample__";
+    desc.input_access = {InputAccess::TexelFetch, InputAccess::SamePixel};
+    desc.infer = [map_type](const Variables& xs)
+            -> std::pair<VType, ImgSize> {
+        return {map_type, xs[1].getImgSize()};
+    };
+    desc.bwd = NullBwd;  // forward-only (env-map gradients are Stage C)
+    desc.cpu = [](const std::vector<CpuTensor>& xs) -> CpuTensor {
+        const CpuTensor& map_t = xs[0];
+        const CpuTensor& dir_t = xs[1];
+        const uint32_t n = map_t.numComp();
+        CpuTensor y;
+        y.vtype = map_t.vtype;
+        y.size = dir_t.size;
+        y.data.assign(dir_t.numPixels() * n, 0.f);
+        for (size_t p = 0; p < dir_t.numPixels(); p++) {
+            ibl::Vec3 d = {dir_t.data[p * 3 + 0], dir_t.data[p * 3 + 1],
+                           dir_t.data[p * 3 + 2]};
+            const float dlen = std::sqrt(ibl::Dot(d, d));
+            if (dlen < 1e-8f) {
+                continue;
+            }
+            d = {d.x / dlen, d.y / dlen, d.z / dlen};
+            float u, v;
+            ibl::EquirectUvFromDir(d, &u, &v);
+            ibl::BilerpWrap(map_t.data.data(), map_t.size.w, map_t.size.h,
+                            n, u, v, &y.data[p * n]);
+        }
+        return y;
+    };
+    return MakeOp(std::move(desc), {map, dir});
+}
+
+Variable IrradianceConv(const Variable& env, ImgSize out_size) {
+    const VType env_type = env.getVType();
+    DRESSI_CHECK(!IsIntVType(env_type) && !IsMatrixVType(env_type),
+                 "IrradianceConv: env must be a float image");
+    DRESSI_CHECK(!env.getImgSize().isUniform() && !out_size.isUniform(),
+                 "IrradianceConv: env and output must be non-uniform");
+
+    OpDesc desc;
+    desc.name = "IrradianceConv";
+    // Deterministic direct sum over every source texel (cos-weighted with
+    // the equirect sin(theta) area term); stores E(N) / pi so a constant
+    // environment L0 maps to exactly L0. Pre-pool the source to <= 64x32
+    // (BuildIrradianceSample) — the loop is output_texels * src_texels.
+    desc.fwd_code = "__irradiance_conv__";
+    desc.input_access = {InputAccess::TexelFetch};
+    desc.infer = [env_type, out_size](const Variables&)
+            -> std::pair<VType, ImgSize> {
+        return {env_type, out_size};
+    };
+    desc.bwd = NullBwd;  // forward-only (transpose gather is Stage C)
+    desc.cpu = [out_size](const std::vector<CpuTensor>& xs) -> CpuTensor {
+        const CpuTensor& env_t = xs[0];
+        const uint32_t sw = env_t.size.w, sh = env_t.size.h;
+        const uint32_t n = env_t.numComp();
+        const float scale = ibl::kTwoPi / (float(sw) * float(sh));
+        CpuTensor y;
+        y.vtype = env_t.vtype;
+        y.size = out_size;
+        y.data.assign(size_t(out_size.w) * out_size.h * n, 0.f);
+        for (uint32_t oy = 0; oy < out_size.h; oy++) {
+            for (uint32_t ox = 0; ox < out_size.w; ox++) {
+                const ibl::Vec3 N = ibl::DirFromEquirectUv(
+                        (float(ox) + 0.5f) / float(out_size.w),
+                        (float(oy) + 0.5f) / float(out_size.h));
+                float* o = &y.data[(size_t(oy) * out_size.w + ox) * n];
+                for (uint32_t sy = 0; sy < sh; sy++) {
+                    const float sv = (float(sy) + 0.5f) / float(sh);
+                    const float sin_th = std::sin(sv * ibl::kPi);
+                    for (uint32_t sx = 0; sx < sw; sx++) {
+                        const ibl::Vec3 d = ibl::DirFromEquirectUv(
+                                (float(sx) + 0.5f) / float(sw), sv);
+                        const float w =
+                                std::max(ibl::Dot(N, d), 0.f) * sin_th;
+                        const float* e =
+                                &env_t.data[(size_t(sy) * sw + sx) * n];
+                        for (uint32_t c = 0; c < n; c++) {
+                            o[c] += e[c] * w;
+                        }
+                    }
+                }
+                for (uint32_t c = 0; c < n; c++) {
+                    o[c] *= scale;
+                }
+            }
+        }
+        return y;
+    };
+    return MakeOp(std::move(desc), {env});
+}
+
+Variable PrefilterEnv(const Variable& env, ImgSize out_size, float roughness,
+                      uint32_t n_samples) {
+    const VType env_type = env.getVType();
+    DRESSI_CHECK(!IsIntVType(env_type) && !IsMatrixVType(env_type),
+                 "PrefilterEnv: env must be a float image");
+    DRESSI_CHECK(!env.getImgSize().isUniform() && !out_size.isUniform(),
+                 "PrefilterEnv: env and output must be non-uniform");
+    DRESSI_CHECK(n_samples > 0, "PrefilterEnv: n_samples must be > 0");
+
+    OpDesc desc;
+    desc.name = "PrefilterEnv";
+    // GGX-importance-sampled prefilter (split-sum first term, V=N=R;
+    // Hammersley sequence, NoL-weighted). One op instance per roughness
+    // level; sampled with EquirectSample + in-graph LOD blending.
+    desc.fwd_code = "__prefilter_env__ r=" + FloatLiteral(roughness) +
+                    " n=" + std::to_string(n_samples);
+    desc.input_access = {InputAccess::TexelFetch};
+    desc.infer = [env_type, out_size](const Variables&)
+            -> std::pair<VType, ImgSize> {
+        return {env_type, out_size};
+    };
+    desc.bwd = NullBwd;  // forward-only (Stage C swaps in a conv variant)
+    desc.cpu = [out_size, roughness,
+                n_samples](const std::vector<CpuTensor>& xs) -> CpuTensor {
+        const CpuTensor& env_t = xs[0];
+        const uint32_t n = env_t.numComp();
+        CpuTensor y;
+        y.vtype = env_t.vtype;
+        y.size = out_size;
+        y.data.assign(size_t(out_size.w) * out_size.h * n, 0.f);
+        std::vector<float> tap(n);
+        for (uint32_t oy = 0; oy < out_size.h; oy++) {
+            for (uint32_t ox = 0; ox < out_size.w; ox++) {
+                const ibl::Vec3 N = ibl::DirFromEquirectUv(
+                        (float(ox) + 0.5f) / float(out_size.w),
+                        (float(oy) + 0.5f) / float(out_size.h));
+                float* o = &y.data[(size_t(oy) * out_size.w + ox) * n];
+                float wsum = 0.f;
+                for (uint32_t i = 0; i < n_samples; i++) {
+                    float xi0, xi1;
+                    ibl::Hammersley(i, n_samples, &xi0, &xi1);
+                    const ibl::Vec3 h =
+                            ibl::ImportanceSampleGGX(xi0, xi1, roughness, N);
+                    const float ndh2 = 2.f * ibl::Dot(N, h);
+                    const ibl::Vec3 l = ibl::Normalize(
+                            {ndh2 * h.x - N.x, ndh2 * h.y - N.y,
+                             ndh2 * h.z - N.z});
+                    const float nol = ibl::Dot(N, l);
+                    if (nol > 0.f) {
+                        float u, v;
+                        ibl::EquirectUvFromDir(l, &u, &v);
+                        ibl::BilerpWrap(env_t.data.data(), env_t.size.w,
+                                        env_t.size.h, n, u, v, tap.data());
+                        for (uint32_t c = 0; c < n; c++) {
+                            o[c] += tap[c] * nol;
+                        }
+                        wsum += nol;
+                    }
+                }
+                const float wden = std::max(wsum, 1e-4f);
+                for (uint32_t c = 0; c < n; c++) {
+                    o[c] /= wden;
+                }
+            }
+        }
+        return y;
+    };
+    return MakeOp(std::move(desc), {env});
+}
+
+Variable BrdfIntegrationLut(ImgSize size, uint32_t n_samples) {
+    DRESSI_CHECK(!size.isUniform(),
+                 "BrdfIntegrationLut: size must be non-uniform");
+    DRESSI_CHECK(n_samples > 0, "BrdfIntegrationLut: n_samples must be > 0");
+
+    OpDesc desc;
+    desc.name = "BrdfIntegrationLut";
+    // Split-sum second term: VEC2 (scale A, bias B) over
+    // (NdotV, roughness) texel centers; Smith-G with k = roughness^2 / 2.
+    // Zero inputs (ScreenCoord pattern) — always static, always pruned.
+    desc.fwd_code = "__brdf_lut__ n=" + std::to_string(n_samples);
+    desc.infer = [size](const Variables&) -> std::pair<VType, ImgSize> {
+        return {VEC2, size};
+    };
+    desc.bwd = NullBwd;
+    desc.cpu = [size, n_samples](const std::vector<CpuTensor>&) -> CpuTensor {
+        CpuTensor y;
+        y.vtype = VEC2;
+        y.size = size;
+        y.data.assign(size_t(size.w) * size.h * 2, 0.f);
+        for (uint32_t oy = 0; oy < size.h; oy++) {
+            const float rough = (float(oy) + 0.5f) / float(size.h);
+            const float k = rough * rough / 2.f;
+            for (uint32_t ox = 0; ox < size.w; ox++) {
+                const float ndv = (float(ox) + 0.5f) / float(size.w);
+                const ibl::Vec3 V = {
+                        std::sqrt(std::max(1.f - ndv * ndv, 0.f)), 0.f,
+                        ndv};
+                float a = 0.f, b = 0.f;
+                for (uint32_t i = 0; i < n_samples; i++) {
+                    float xi0, xi1;
+                    ibl::Hammersley(i, n_samples, &xi0, &xi1);
+                    const ibl::Vec3 h = ibl::ImportanceSampleGGX(
+                            xi0, xi1, rough, {0.f, 0.f, 1.f});
+                    const float vdh2 = 2.f * ibl::Dot(V, h);
+                    const ibl::Vec3 l = ibl::Normalize(
+                            {vdh2 * h.x - V.x, vdh2 * h.y - V.y,
+                             vdh2 * h.z - V.z});
+                    const float nol = std::max(l.z, 0.f);
+                    const float noh = std::max(h.z, 0.f);
+                    const float voh = std::max(ibl::Dot(V, h), 0.f);
+                    if (nol > 0.f) {
+                        const float g =
+                                ibl::G1Ibl(ndv, k) * ibl::G1Ibl(nol, k);
+                        const float gv = g * voh /
+                                         std::max(noh * ndv, 1e-8f);
+                        const float fc = std::pow(1.f - voh, 5.f);
+                        a += (1.f - fc) * gv;
+                        b += fc * gv;
+                    }
+                }
+                const size_t o = (size_t(oy) * size.w + ox) * 2;
+                y.data[o + 0] = a / float(n_samples);
+                y.data[o + 1] = b / float(n_samples);
+            }
+        }
+        return y;
+    };
+    return MakeOp(std::move(desc), {});
+}
+
+Variable AvgPool2x2(const Variable& x) {
+    // Reduce2x2Sum zero-pads out-of-range texels: use power-of-two sizes
+    // for exact averages (the IBL builders do)
+    return Mul(Reduce2x2Sum(x), Float(0.25f));
 }
 
 }  // namespace F

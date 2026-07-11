@@ -29,8 +29,39 @@ Mesh LoadObjMesh(const std::string& path);
 // present), normalized like LoadObjMesh.
 Mesh LoadGltfMesh(const std::string& path);
 
+// First mesh-bearing node's first primitive plus its pbrMetallicRoughness
+// material, for the PBR examples. Textures are decoded to float [0,1]
+// (width == 0 when a material slot is absent); base_color/emissive stay
+// sRGB-encoded (convert with SrgbToLinear before shading in linear space).
+// Unlike LoadGltfMesh, uv keeps the raw glTF V (top-left origin — the 1-v
+// flip there is an OBJ convention that would mirror glTF textures).
+struct GltfScene {
+    Mesh mesh;
+    dressi::CpuImage normal;              // {V,1,3}, unit, node-transformed
+    dressi::CpuImage tangent;             // {V,1,4}, xyz + w handedness
+    dressi::CpuImage base_color;          // sRGB-encoded
+    dressi::CpuImage metallic_roughness;  // linear; G=roughness, B=metallic
+    dressi::CpuImage normal_map;          // linear, tangent space
+    dressi::CpuImage occlusion;           // linear; R = AO
+    dressi::CpuImage emissive;            // sRGB-encoded
+};
+
+// NORMAL is computed (area-weighted) and TANGENT generated (Lengyel) when
+// the file lacks them; the node's local transform is pre-applied on the
+// CPU. `normalize` recenters/rescales positions like LoadGltfMesh.
+GltfScene LoadGltfScene(const std::string& path, bool normalize = true);
+
 // Loads an RGB image as float [0,1]
 dressi::CpuImage LoadImageRgb(const std::string& path);
+
+// Loads an EXR (e.g. an equirectangular HDR env map) as 3-channel float
+dressi::CpuImage LoadImageExr(const std::string& path);
+
+// Gamma-decodes an sRGB-encoded [0,1] image to linear (pow 2.2)
+dressi::CpuImage SrgbToLinear(const dressi::CpuImage& img);
+
+// 2x2 box-downsample; odd extents round up (edge rows/cols clamp)
+dressi::CpuImage DownsampleHalf(const dressi::CpuImage& img);
 
 // Saves a 1- or 3-channel float image (clamped to [0,1]) as PNG
 void SaveImagePng(const std::string& path, const dressi::CpuImage& img);

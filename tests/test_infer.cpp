@@ -104,3 +104,34 @@ TEST(Infer, SpatialReductions) {
     EXPECT_EQ(m.getVType(), FLOAT);
     EXPECT_EQ(m.getImgSize(), (ImgSize{1, 1}));
 }
+
+TEST(Infer, IblOps) {
+    Variable env(VEC3, {16, 8});
+    Variable dir(VEC3, {32, 32});
+    Variable uv(VEC2, {32, 32});
+    Variable inv_uv(VEC4, {16, 8});
+
+    EXPECT_EQ(F::EquirectSample(env, dir).getVType(), VEC3);
+    EXPECT_EQ(F::EquirectSample(env, dir).getImgSize(), (ImgSize{32, 32}));
+    EXPECT_THROW(F::EquirectSample(env, uv), DressiError);  // dir not VEC3
+    Variable uni(VEC3, {1, 1});
+    EXPECT_THROW(F::EquirectSample(uni, dir), DressiError);  // {1,1} map
+
+    EXPECT_EQ(F::TextureBilinear(env, uv, inv_uv).getVType(), VEC3);
+    EXPECT_EQ(F::TextureBilinear(env, uv, inv_uv).getImgSize(),
+              (ImgSize{32, 32}));
+    EXPECT_THROW(F::TextureBilinear(env, dir, inv_uv), DressiError);
+    Variable bad_inv(VEC4, {8, 8});
+    EXPECT_THROW(F::TextureBilinear(env, uv, bad_inv), DressiError);
+
+    EXPECT_EQ(F::IrradianceConv(env, {8, 4}).getVType(), VEC3);
+    EXPECT_EQ(F::IrradianceConv(env, {8, 4}).getImgSize(), (ImgSize{8, 4}));
+    EXPECT_EQ(F::PrefilterEnv(env, {8, 4}, 0.5f, 32).getVType(), VEC3);
+    EXPECT_EQ(F::PrefilterEnv(env, {8, 4}, 0.5f, 32).getImgSize(),
+              (ImgSize{8, 4}));
+    EXPECT_EQ(F::BrdfIntegrationLut({16, 16}, 32).getVType(), VEC2);
+    EXPECT_EQ(F::BrdfIntegrationLut({16, 16}, 32).getImgSize(),
+              (ImgSize{16, 16}));
+    EXPECT_EQ(F::AvgPool2x2(env).getImgSize(), (ImgSize{8, 4}));
+    EXPECT_EQ(F::AvgPool2x2(env).getVType(), VEC3);
+}

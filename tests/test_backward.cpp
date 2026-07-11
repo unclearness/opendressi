@@ -411,3 +411,56 @@ TEST(Backward, TraverseFuncsTopoOrder) {
         EXPECT_LT(funcs[i - 1].id(), funcs[i].id());
     }
 }
+
+TEST(Backward, TextureBilinearTextureGrad) {
+    // Synthetic deferred setup: an 8x8 screen samples a 4x4 texture with a
+    // smooth uv map kept strictly inside the clamp-free region, and the
+    // inverse-UV table anchors each texel at its nearest screen pixel so
+    // the +-3 gather window sees every contributing pixel (the tent-weight
+    // gather is exact under these conditions).
+    const ImgSize tex_size = {4, 4};
+    const ImgSize screen = {8, 8};
+    Variable tex(FLOAT, tex_size);
+    Variable uv(VEC2, screen);
+    Variable inv_uv(VEC4, tex_size);
+    Variable out = F::TextureBilinear(tex, uv, inv_uv);
+    Variable loss = F::Mean(out * out + out);
+
+    auto tex_t = MakeTensor(FLOAT, tex_size, [](size_t i) {
+        return 0.2f + 0.11f * float((i * 5) % 7);
+    });
+    CpuTensor uv_t;
+    uv_t.vtype = VEC2;
+    uv_t.size = screen;
+    uv_t.data.resize(size_t(screen.w) * screen.h * 2);
+    for (uint32_t py = 0; py < screen.h; py++) {
+        for (uint32_t px = 0; px < screen.w; px++) {
+            const size_t o = (size_t(py) * screen.w + px) * 2;
+            uv_t.data[o + 0] = 0.125f + 0.75f * (float(px) + 0.5f) / 8.f;
+            uv_t.data[o + 1] = 0.125f + 0.75f * (float(py) + 0.5f) / 8.f;
+        }
+    }
+    CpuTensor inv_t;
+    inv_t.vtype = VEC4;
+    inv_t.size = tex_size;
+    inv_t.data.assign(size_t(tex_size.w) * tex_size.h * 4, 0.f);
+    for (uint32_t ty = 0; ty < tex_size.h; ty++) {
+        for (uint32_t tx = 0; tx < tex_size.w; tx++) {
+            // Screen pixel whose sampling coordinate is nearest this texel
+            // (st = 0.375 * (p + 0.5), so p + 0.5 = t / 0.375)
+            const auto anchor = [](uint32_t t) {
+                float p = float(t) / 0.375f;
+                if (p > 7.f) {
+                    p = 7.f;
+                }
+                return p;
+            };
+            const size_t o = (size_t(ty) * tex_size.w + tx) * 4;
+            inv_t.data[o + 0] = std::floor(anchor(tx)) + 0.5f;
+            inv_t.data[o + 1] = std::floor(anchor(ty)) + 0.5f;
+            inv_t.data[o + 2] = 1.f;
+        }
+    }
+
+    CheckGrad(loss, {{tex, tex_t}, {uv, uv_t}, {inv_uv, inv_t}}, tex);
+}

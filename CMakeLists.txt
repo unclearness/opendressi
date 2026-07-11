@@ -63,10 +63,18 @@ FetchContent_Declare(tinygltf
     GIT_SHALLOW TRUE
     SOURCE_SUBDIR nonexistent_disable_add_subdirectory)
 FetchContent_MakeAvailable(tinygltf)
+# tinyexr (EXR env maps for the PBS examples; zlib comes from the stb
+# implementations already compiled in asset_utils.cpp)
+FetchContent_Declare(tinyexr
+    GIT_REPOSITORY https://github.com/syoyo/tinyexr.git
+    GIT_TAG v1.0.9
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR nonexistent_disable_add_subdirectory)
+FetchContent_MakeAvailable(tinyexr)
 add_library(dressi_assets INTERFACE)
 target_include_directories(dressi_assets SYSTEM INTERFACE
     "${tinyobjloader_SOURCE_DIR}" "${stb_SOURCE_DIR}"
-    "${tinygltf_SOURCE_DIR}")
+    "${tinygltf_SOURCE_DIR}" "${tinyexr_SOURCE_DIR}")
 
 # glad Vulkan loader (user-provided) for the example live viewer.
 # The SDK include path comes first so the full vk_video header set is used
