@@ -7,7 +7,13 @@ VkContextPtr CreateVkContext(bool debug_enable) {
     ctx->instance = vkw::CreateInstance("dressi", 1, "dressi", 1, debug_enable,
                                         /*surface_enable=*/false);
     ctx->physical_device = vkw::GetFirstPhysicalDevice(ctx->instance);
-    ctx->queue_family_idx = vkw::GetQueueFamilyIdx(ctx->physical_device);
+    // Do NOT require the explicit TRANSFER bit (vkw's default): per the
+    // spec, graphics or compute capability implies transfer support, and
+    // Adreno omits the bit on its graphics+compute family ("No sufficient
+    // queue" on Snapdragon otherwise).
+    ctx->queue_family_idx = vkw::GetQueueFamilyIdx(
+            ctx->physical_device,
+            vk::QueueFlagBits::eGraphics | vk::QueueFlagBits::eCompute);
     // Enable the physical device's feature set (gl_PrimitiveID in fragment
     // shaders needs the Geometry capability from the geometryShader feature)
     ctx->device = vkw::CreateDevice(ctx->queue_family_idx,
