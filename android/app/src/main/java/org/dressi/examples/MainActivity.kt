@@ -223,6 +223,9 @@ class MainActivity : Activity(), NativeBridge.Listener {
 
     // ------------------------------ Runs --------------------------------
 
+    // Native defaults == desktop defaults (verified on Adreno 740: no
+    // device limit is hit; full optimization runs take ~5-8 min). Only the
+    // paths differ from desktop. Tweak here for shorter runs.
     private fun defaultArgs(name: String): Array<String> {
         val data = dataDir!!
         val out = File(filesDir, "out/$name").absolutePath
@@ -230,21 +233,11 @@ class MainActivity : Activity(), NativeBridge.Listener {
         val env = File(data, "suburban_garden_512.exr")
         return when (name) {
             "image_fitting" -> arrayOf()
-            "texture_optimization" -> arrayOf(
-                "--data-dir=${File(data, "bunny")}", "--out-dir=$out",
-                "--views=4", "--iters=1000")
-            "silhouette_optimization" -> arrayOf(
-                "--data-dir=${File(data, "bunny")}", "--out-dir=$out",
-                "--views=6", "--iters=200", "--samples=4")
-            "pbr_shading" -> arrayOf(
-                "--mesh=$mesh", "--env=$env", "--out-dir=$out",
-                "--size=256")  // frames=0: orbit until Stop
-            "pbr_material_optimization" -> arrayOf(
-                "--mesh=$mesh", "--env=$env", "--out-dir=$out",
-                "--size=192", "--tex=256", "--iters=800")
+            "texture_optimization", "silhouette_optimization" -> arrayOf(
+                "--data-dir=${File(data, "bunny")}", "--out-dir=$out")
+            "pbr_shading", "pbr_material_optimization",
             "pbr_envmap_optimization" -> arrayOf(
-                "--mesh=$mesh", "--env=$env", "--out-dir=$out",
-                "--iters=800")
+                "--mesh=$mesh", "--env=$env", "--out-dir=$out")
             else -> arrayOf()
         }
     }
