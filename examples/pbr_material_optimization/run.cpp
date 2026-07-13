@@ -417,6 +417,8 @@ int dressi_examples::RunPbrMaterialOptimization(
                  median_ms, opt_warmup, warmup_ms, first_build_ms);
     {
         BenchRecord rec("pbr_material_optimization", ad.getDeviceName());
+        rec.addPacking(ad.getFuncCount(), ad.getSubStageCount(),
+                       ad.getStageCount());
         rec.add("optimize", optimize);
         rec.add("screen", int64_t(size));
         rec.add("tex", int64_t(tex_max));

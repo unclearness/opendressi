@@ -86,7 +86,12 @@ public:
     // setGradOutputsEnabled(true) to make the gradients recvImg-readable.
     std::vector<std::pair<Variable, Variable>> inputGrads() const;
 
-    // Introspection (current build)
+    // Introspection (current build). getFuncCount() is the unpacked backward-
+    // graph op count (the trivial-packer 1-func-per-pass baseline); comparing
+    // it to getSubStageCount()/getStageCount() shows how far substage/stage
+    // packing collapsed it. The packed counts are device-dependent — greedy
+    // fusion is bounded by the physical device's Vulkan limits.
+    size_t getFuncCount() const;
     size_t getStageCount() const;
     size_t getSubStageCount() const;
     // Vulkan physical-device name (e.g. "Adreno (TM) 740"); empty until a

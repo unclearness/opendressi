@@ -276,6 +276,8 @@ int dressi_examples::RunPbrShading(const std::vector<std::string>& args,
         // Benchmark record for scripts/bench_summary.py (a viewer, not an
         // optimization — the metric is exec+readback per frame)
         BenchRecord rec("pbr_shading", ad.getDeviceName());
+        rec.addPacking(ad.getFuncCount(), ad.getSubStageCount(),
+                       ad.getStageCount());
         rec.add("screen", int64_t(screen.w));
         rec.add("frames", int64_t(frame_idx));
         rec.add("median_ms_per_iter", med);

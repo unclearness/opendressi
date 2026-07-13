@@ -117,6 +117,8 @@ int dressi_examples::RunImageFitting(const std::vector<std::string>& args,
                  median_ms, opt_warmup, warmup_ms, first_build_ms);
     std::filesystem::create_directories(out_dir);
     BenchRecord rec("image_fitting", dressi_ad.getDeviceName());
+    rec.addPacking(dressi_ad.getFuncCount(), dressi_ad.getSubStageCount(),
+                   dressi_ad.getStageCount());
     rec.add("screen", int64_t(W));
     rec.add("iters", int64_t(n_iters));
     rec.add("median_ms_per_iter", median_ms);

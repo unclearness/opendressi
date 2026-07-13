@@ -220,6 +220,10 @@ std::string DressiAD::getDeviceName() const {
     return std::string(props->deviceName.data());
 }
 
+size_t DressiAD::getFuncCount() const {
+    return m_impl->all_funcs.size();
+}
+
 size_t DressiAD::getStageCount() const {
     return m_impl->stages.size();
 }

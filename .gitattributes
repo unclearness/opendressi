@@ -1,0 +1,3 @@
+# Shell scripts must stay LF so their shebang works on Linux/Android even when
+# checked out on Windows (core.autocrlf=true).
+*.sh text eol=lf

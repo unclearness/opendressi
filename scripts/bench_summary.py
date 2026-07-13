@@ -94,6 +94,21 @@ def warmup_of(rec):
     return s
 
 
+def packing_of(rec):
+    # Packing reduction "funcs->substages->stages": the unpacked backward-graph
+    # op count collapsed by substage packing then by stage packing into Vulkan
+    # render passes. Device-dependent (greedy fusion is bounded by the GPU's
+    # Vulkan limits). "-" for older records without the fields.
+    if "stages" not in rec:
+        return "-"
+    funcs = rec.get("funcs")
+    substages = rec.get("substages")
+    stages = rec["stages"]
+    if funcs is not None and substages is not None:
+        return f"{funcs}->{substages}->{stages}"
+    return str(stages)
+
+
 def quality_of(rec):
     if "mean_iou" in rec:
         return f"IoU {rec['mean_iou']:.4f}"
@@ -132,13 +147,14 @@ def main():
         rows.sort(key=lambda r: r.get("median_ms_per_iter", float("inf")))
         print(f"## {example}\n")
         print("| device | host | parameters | median ms/iter "
-              "| warmup ms (first) | quality |")
-        print("| --- | --- | --- | ---: | ---: | --- |")
+              "| warmup ms (first) | packing f->s->st | quality |")
+        print("| --- | --- | --- | ---: | ---: | ---: | --- |")
         for r in rows:
             print(f"| {r.get('device', '?')} | {host_of(r)} "
                   f"| {params_of(r)} "
                   f"| {r.get('median_ms_per_iter', float('nan')):.3f} "
                   f"| {warmup_of(r)} "
+                  f"| {packing_of(r)} "
                   f"| {quality_of(r)} |")
         print()
     return 0

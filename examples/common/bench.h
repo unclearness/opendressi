@@ -34,6 +34,14 @@ public:
     void add(const std::string& key, int64_t value);
     void add(const std::string& key, bool value);
 
+    // Record the packing reduction as three keys (funcs, substages, stages):
+    // the unpacked backward-graph op count collapsed by substage packing then
+    // by stage packing into Vulkan render passes. Pass the steady-state build's
+    // DressiAD::getFuncCount()/getSubStageCount()/getStageCount(). The packed
+    // counts are DEVICE-DEPENDENT — greedy fusion is bounded by the physical
+    // device's Vulkan limits, so the same graph packs differently per GPU.
+    void addPacking(int64_t funcs, int64_t substages, int64_t stages);
+
     void save(const std::string& path) const;
 
 private:

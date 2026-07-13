@@ -502,6 +502,8 @@ int dressi_examples::RunPbrEnvmapOptimization(
                  warmup_ms, first_build_ms);
     {
         BenchRecord rec("pbr_envmap_optimization", ad.getDeviceName());
+        rec.addPacking(ad.getFuncCount(), ad.getSubStageCount(),
+                       ad.getStageCount());
         rec.add("screen", int64_t(size));
         rec.add("envres", int64_t(env_size.w));
         rec.add("views", int64_t(n_views));

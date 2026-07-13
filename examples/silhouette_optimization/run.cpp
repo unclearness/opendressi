@@ -675,6 +675,8 @@ int dressi_examples::RunSilhouetteOptimization(
                  warmup_ms, first_build_ms);
     {
         BenchRecord rec("silhouette_optimization", ad.getDeviceName());
+        rec.addPacking(ad.getFuncCount(), ad.getSubStageCount(),
+                       ad.getStageCount());
         rec.add("technique", opt.technique);
         rec.add("screen", int64_t(opt.screen));
         rec.add("views", int64_t(opt.n_views));

@@ -3,6 +3,7 @@
 #include <spdlog/fmt/fmt.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <thread>
@@ -68,8 +69,16 @@ std::string OsString() {
     RegGetValueA(HKEY_LOCAL_MACHINE,
                  "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
                  "CurrentBuildNumber", RRF_RT_REG_SZ, nullptr, build, &n);
-    return fmt::format("{} (build {})", product[0] ? product : "Windows",
-                       build[0] ? build : "?");
+    // ProductName still reads "Windows 10 ..." on Windows 11 (Microsoft never
+    // updated the string); build >= 22000 is the real Windows 11 boundary.
+    std::string name = product[0] ? product : "Windows";
+    if (const int b = build[0] ? std::atoi(build) : 0; b >= 22000) {
+        const size_t pos = name.find("Windows 10");
+        if (pos != std::string::npos) {
+            name.replace(pos, sizeof("Windows 10") - 1, "Windows 11");
+        }
+    }
+    return fmt::format("{} (build {})", name, build[0] ? build : "?");
 #elif defined(__ANDROID__)
     const std::string rel = SysProp("ro.build.version.release");
     const std::string manu = SysProp("ro.product.manufacturer");
@@ -185,6 +194,13 @@ void BenchRecord::add(const std::string& key, int64_t value) {
 
 void BenchRecord::add(const std::string& key, bool value) {
     m_json += fmt::format(",\"{}\":{}", key, value ? "true" : "false");
+}
+
+void BenchRecord::addPacking(int64_t funcs, int64_t substages,
+                             int64_t stages) {
+    add("funcs", funcs);
+    add("substages", substages);
+    add("stages", stages);
 }
 
 void BenchRecord::save(const std::string& path) const {

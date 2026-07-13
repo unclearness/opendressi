@@ -315,6 +315,8 @@ int dressi_examples::RunTextureOptimization(
                  median_ms, opt_warmup, warmup_ms, first_build_ms);
     {
         BenchRecord rec("texture_optimization", ad.getDeviceName());
+        rec.addPacking(ad.getFuncCount(), ad.getSubStageCount(),
+                       ad.getStageCount());
         rec.add("screen", int64_t(screen.w));
         rec.add("views", int64_t(n_views));
         rec.add("iters", int64_t(n_iters));
