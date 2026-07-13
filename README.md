@@ -23,9 +23,11 @@ builds on the same engine.
 
 ### Highlights
 
-- **Hardware-agnostic.** One Vulkan engine, verified across 7 devices — three
-  NVIDIA discrete GPUs, an Intel iGPU, two phones (Snapdragon 8 Gen 2 / Adreno
-  740 and Dimensity 9500 / Mali-G1-Ultra), and CPU software Vulkan (llvmpipe).
+- **Hardware-agnostic.** One Vulkan engine, verified across 8 devices — three
+  NVIDIA discrete GPUs, an Intel iGPU, two phones (Dimensity 9500 / Mali-G1-Ultra,
+  Xiaomi 17T Pro and Dimensity 9200+ / Mali-G715, Xiaomi 13T Pro), a tablet
+  (Snapdragon 8 Gen 2 / Adreno 740, Xiaomi Pad 6S), and CPU software Vulkan
+  (llvmpipe).
 - **Faster than the baselines below 2048².** Beats nvdiffrast (GL & CUDA) and
   DRTK at every resolution on the paper's silhouette task, by baking the whole
   forward + backward + optimizer into pre-recorded command buffers with zero
@@ -180,20 +182,21 @@ The identical backward graph runs from a workstation GPU, through an Intel
 integrated GPU, down to phones — to the **same quality**. Median ms/iter
 (default parameters):
 
-| example (params) | RTX PRO 6000 | Iris Xe (iGPU) | Adreno 740 (phone) | Mali-G1-Ultra (phone) | quality |
-| --- | ---: | ---: | ---: | ---: | --- |
-| image_fitting 64px | 0.056 | 0.32 | 0.23 | 1.01 | max err 0.0005 |
-| texture_optimization 256px | 0.96 | 15.7 | 48.4 | 23.6 | 98.7% |
-| silhouette (aa) 128px | 1.21 | 3.34 | 21.6 | 11.5 | IoU 0.95 |
-| silhouette (hardsoftras) 128px | 2.16 | 9.96 | 23.7 | 32.5 | IoU 0.95 |
-| pbr_material 256px | 2.73 | 17.9 | 55.2 | 40.9 | PSNR 20.6 dB |
-| pbr_envmap 192px | 8.53 | 105 | 304 | 181 | PSNR 18.2 dB |
-| pbr_shading 512px | 677 FPS | 116 FPS | 56 FPS | 19 FPS | — |
+| example (params) | RTX PRO 6000 | Iris Xe (iGPU) | Adreno 740 (tablet) | Mali-G1-Ultra (phone) | Mali-G715 (phone) | quality |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| image_fitting 64px | 0.056 | 0.32 | 0.23 | 1.01 | 2.04 | max err 0.0005 |
+| texture_optimization 256px | 0.96 | 15.7 | 48.4 | 23.6 | 24.3 | 98.7% |
+| silhouette (aa) 128px | 1.21 | 3.34 | 21.6 | 11.5 | 21.2 | IoU 0.95 |
+| silhouette (hardsoftras) 128px | 2.16 | 9.96 | 23.7 | 32.5 | 36.6 | IoU 0.95 |
+| pbr_material 256px | 2.73 | 17.9 | 55.2 | 40.9 | 47.0 | PSNR 20.6 dB |
+| pbr_envmap 192px | 8.53 | 105 | 304 | 181 | 200 | PSNR 18.2 dB |
+| pbr_shading 512px | 677 FPS | 116 FPS | 56 FPS | 19 FPS | 42 FPS | — |
 
-Quality is device-independent (validated across all 7 devices). Verified on
-three discrete NVIDIA GPUs, the Intel iGPU, two phones (Snapdragon 8 Gen 2 /
-Adreno 740 and Dimensity 9500 / Mali-G1-Ultra), and CPU software Vulkan
-(llvmpipe) — the full 7-device table, warmup and packing columns are in
+Quality is device-independent (validated across all 8 devices). Verified on
+three discrete NVIDIA GPUs, the Intel iGPU, two phones (Dimensity 9500 /
+Mali-G1-Ultra, Xiaomi 17T Pro and Dimensity 9200+ / Mali-G715, Xiaomi 13T Pro),
+a tablet (Snapdragon 8 Gen 2 / Adreno 740, Xiaomi Pad 6S), and CPU software
+Vulkan (llvmpipe) — the full 8-device table, warmup and packing columns are in
 **[docs/benchmarks.md](docs/benchmarks.md)**.
 
 ### vs the paper, nvdiffrast, and DRTK
