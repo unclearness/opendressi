@@ -52,6 +52,13 @@ Common requirements: a Vulkan 1.1+ GPU, CMake ≥ 3.28, and the LunarG Vulkan
 SDK (used for glslang; auto-detected — see below). The engine core is headless
 (`VkContext`); GLFW/glad drive an optional live viewer only.
 
+Build verified with **Vulkan SDK 1.4.350.0** (desktop; the Android build
+FetchContent-pins glslang / SPIRV-Tools / Vulkan-Headers to the matching
+`vulkan-sdk-1.4.350.0` tag). The engine creates its instance at API version
+**Vulkan 1.1**, so it runs on any 1.1+ driver — see
+[docs/benchmarks.md](docs/benchmarks.md) for the runtime versions verified
+across devices.
+
 ### Windows
 
 Visual Studio 2022, x64. The Vulkan SDK is auto-detected under `C:\VulkanSDK\*`

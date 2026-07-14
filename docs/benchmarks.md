@@ -38,6 +38,15 @@ Devices:
 - **Mali-G715-Immortalis MC11** — MediaTek Dimensity 9200+, Xiaomi 13T Pro, Android 15 (phone)
 - **llvmpipe (LLVM 20.1.2)** — Mesa lavapipe, CPU software Vulkan
 
+**Vulkan versions.** Built with the Vulkan SDK **1.4.350.0** (glslang for GLSL
+compilation; the Android build pins glslang / SPIRV-Tools / Vulkan-Headers to
+the matching `vulkan-sdk-1.4.350.0` tag). The engine creates its instance at
+API version **Vulkan 1.1** and requests no feature above it (only the optional
+`geometryShader` device feature, for `gl_PrimitiveID`), so any Vulkan 1.1+
+driver runs the identical graph. All eight devices' drivers report Vulkan 1.1
+or newer — e.g. the primary RTX PRO 6000 Blackwell reports Vulkan **1.4.329**
+(NVIDIA 596.72).
+
 Median ms/iter (default parameters), `packing f→s→st` = unpacked backward-graph
 ops → substages → Vulkan render passes:
 
