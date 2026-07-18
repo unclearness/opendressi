@@ -5,6 +5,57 @@ paper *"Dressi: A Hardware-Agnostic Differentiable Renderer with Reactive
 Shader Packing and Soft Rasterization"* (Takimoto et al., Eurographics 2022,
 [arXiv:2204.01386](https://arxiv.org/abs/2204.01386)).
 
+<!-- GIFs are hosted on the project wiki (demo/ in the wiki repo), not in
+     this repository. Regenerate with scripts/make_readme_gifs.sh. -->
+<table>
+  <tr>
+    <td align="center" width="25%">
+      <img src="https://raw.githubusercontent.com/wiki/unclearness/dressi/demo/image_fitting.gif" alt="image fitting" width="100%"><br>
+      <sub><a href="examples/image_fitting">image_fitting</a></sub>
+    </td>
+    <td align="center" width="25%">
+      <img src="https://raw.githubusercontent.com/wiki/unclearness/dressi/demo/texture_optimization.gif" alt="texture optimization" width="100%"><br>
+      <sub><a href="examples/texture_optimization">texture_optimization</a></sub>
+    </td>
+    <td align="center" width="25%">
+      <img src="https://raw.githubusercontent.com/wiki/unclearness/dressi/demo/silhouette_hardsoftras.gif" alt="silhouette optimization (HardSoftRas)" width="100%"><br>
+      <sub><a href="examples/silhouette_optimization">silhouette</a> (HardSoftRas)</sub>
+    </td>
+    <td align="center" width="25%">
+      <img src="https://raw.githubusercontent.com/wiki/unclearness/dressi/demo/silhouette_aa.gif" alt="silhouette optimization (screen-space AA)" width="100%"><br>
+      <sub><a href="examples/silhouette_optimization">silhouette</a> (AA)</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="25%">
+      <img src="https://raw.githubusercontent.com/wiki/unclearness/dressi/demo/shape_texture_optimization.gif" alt="shape then texture optimization" width="100%"><br>
+      <sub><a href="examples/shape_texture_optimization">shape_texture_optimization</a></sub>
+    </td>
+    <td align="center" width="25%">
+      <img src="https://raw.githubusercontent.com/wiki/unclearness/dressi/demo/pbr_shading.gif" alt="PBR shading orbit" width="100%"><br>
+      <sub><a href="examples/pbr_shading">pbr_shading</a></sub>
+    </td>
+    <td align="center" width="25%">
+      <img src="https://raw.githubusercontent.com/wiki/unclearness/dressi/demo/pbr_material_optimization.gif" alt="PBR material optimization" width="100%"><br>
+      <sub><a href="examples/pbr_material_optimization">pbr_material_optimization</a></sub>
+    </td>
+    <td align="center" width="25%">
+      <img src="https://raw.githubusercontent.com/wiki/unclearness/dressi/demo/pbr_envmap_optimization.gif" alt="PBR environment-map optimization" width="100%"><br>
+      <sub><a href="examples/pbr_envmap_optimization">pbr_envmap_optimization</a></sub>
+    </td>
+  </tr>
+</table>
+
+All sequences are live optimization / rendering progress on the Vulkan
+engine (every example also runs unmodified on Android — see below):
+
+📹 **shape_texture_optimization on a phone** — camera capture of the
+on-device run (Xiaomi 17T Pro, Dimensity 9500 / Mali-G1-Ultra), showing the
+target / prediction / recovered-atlas streams tiled on one screen
+([full-quality video](https://raw.githubusercontent.com/wiki/unclearness/dressi/demo/20260718_shape_texture_xiaomi_17tpro_dimensity9500_mali.mp4)):
+
+https://github.com/user-attachments/assets/3107391a-ded4-4245-8d2c-35b3ea4d7f65
+
 Dressi-AD is a define-and-run reverse-mode automatic-differentiation framework
 specialized for differentiable rendering: computational graphs of 2D images
 are compiled to GLSL fragment shaders, packed into a minimal number of Vulkan
